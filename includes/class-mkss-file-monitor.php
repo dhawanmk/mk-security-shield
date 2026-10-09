@@ -1,244 +1,175 @@
 <?php
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
+
 /**
- * File Integrity Monitor for MK Security Shield v2.0.
- *
- * Compares WordPress core files against official checksums.
- * Intentionally-removed security-hardening files are excluded from alerts.
- *
- * @package MK_Security_Shield
+ * Checks WordPress core files (wp-admin, wp-includes, root PHP files)
+ * against the official checksums published by WordPress.org. wp-content
+ * (themes/plugins/uploads) is intentionally excluded — those files are
+ * expected to differ from a bare core install and are instead covered by
+ * MKSS_Malware_Scanner.
  */
-
-defined( 'ABSPATH' ) || exit;
-
 class MKSS_File_Monitor {
 
-	/**
-	 * Files that are intentionally removed for security hardening.
-	 * Only their absence is ignored. Present files are always verified.
-	 *
-	 * Admins can extend this list via the 'mkss_security_exclusions' option
-	 * or the 'mkss_file_monitor_exclusions' filter.
-	 *
-	 * @var string[]
-	 */
-	private array $builtin_exclusions = [
-		'readme.html',
-		'license.txt',
-		'wp-config-sample.php',
-	];
+	const CRON_HOOK       = 'mkss_file_monitor_scan';
+	const OPTION_RESULTS  = 'mkss_file_monitor_results';
 
-	public function __construct() {
-		add_action( 'mkss_file_integrity_check', [ $this, 'run_integrity_check' ] );
-		add_action( 'admin_init', [ $this, 'handle_manual_scan' ] );
-		add_action( 'wp_ajax_mkss_file_integrity', [ $this, 'ajax_run_check' ] );
+	private static $instance = null;
+
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+		return self::$instance;
 	}
 
-	/**
-	 * Get the full exclusion list (built-in + user-defined + filtered).
-	 *
-	 * @return string[]
-	 */
-	private function get_exclusions(): array {
-		// User-configured exclusions stored in DB
-		$raw = get_option( 'mkss_security_exclusions', [] );
-		$db_exclusions = is_array( $raw ) ? $raw : preg_split( '/[\r\n,]+/', (string) $raw );
+	private function __construct() {
+		add_action( self::CRON_HOOK, array( $this, 'run_scan' ) );
 
-		$all = array_unique( array_merge( $this->builtin_exclusions, $db_exclusions ) );
+		if ( MKSS_Settings::instance()->get( 'file_monitor_enabled' ) && ! wp_next_scheduled( self::CRON_HOOK ) ) {
+			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', self::CRON_HOOK );
+		}
 
-		/**
-		 * Filters the list of file paths excluded from integrity alerts.
-		 *
-		 * @param string[] $exclusions Relative paths (e.g. 'readme.html').
-		 */
-		return (array) apply_filters( 'mkss_file_monitor_exclusions', $all );
+		add_action( 'admin_menu', array( $this, 'add_menu' ), 30 );
+		add_action( 'admin_post_mkss_run_scan_now', array( $this, 'handle_manual_scan' ) );
 	}
 
-	/**
-	 * Run the core file integrity check against WordPress.org checksums.
-	 *
-	 * @return array{ok: bool, issues: array, skipped: int, checked: int}
-	 */
-	public function run_integrity_check(): array {
-		global $wp_version, $wp_local_package;
-
-		// Installed core package locale can differ from the visitor/admin UI language.
-		$locale = $wp_local_package ?? 'en_US';
-
-		$result = [
-			'ok'      => true,
-			'issues'  => [],
-			'skipped' => 0,
-			'checked' => 0,
-			'errors'  => [],
-			'status'  => 'complete',
-		];
-		$lock = (int) get_option( 'core_updater.lock', 0 );
-		if ( ( file_exists( ABSPATH . '.maintenance' ) && filemtime( ABSPATH . '.maintenance' ) > time() - 10 * MINUTE_IN_SECONDS ) || ( $lock > time() - 15 * MINUTE_IN_SECONDS ) ) {
-			$result['ok'] = false;
-			$result['status'] = 'deferred';
-			$result['errors'][] = 'Core update in progress. Run the integrity check again after it finishes.';
-			return $this->store_result( $result );
+	public static function schedule_events() {
+		if ( ! wp_next_scheduled( self::CRON_HOOK ) ) {
+			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', self::CRON_HOOK );
 		}
-		$api_url = add_query_arg( [ 'version' => $wp_version, 'locale' => $locale ], 'https://api.wordpress.org/core/checksums/1.0/' );
-		$response = wp_safe_remote_get( $api_url, [ 'timeout' => 15, 'redirection' => 0, 'limit_response_size' => 2097152 ] );
-
-		if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
-			$result['ok']     = false;
-			$result['status'] = 'error';
-			$result['errors'] = [ 'Could not reach WordPress checksums API. Integrity has not been verified.' ];
-			return $this->store_result( $result );
-		}
-
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( empty( $body['checksums'] ) || ! is_array( $body['checksums'] ) ) {
-			$result['ok']     = false;
-			$result['status'] = 'error';
-			$result['errors'] = [ 'Invalid checksums response from API. Integrity has not been verified.' ];
-			return $this->store_result( $result );
-		}
-		// Validate the entire manifest before using any supplied path on the filesystem.
-		foreach ( $body['checksums'] as $path => $hash ) {
-			if ( ! is_string( $path ) || ! preg_match( '~^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$~D', $path ) || in_array( '..', explode( '/', $path ), true ) || ! is_string( $hash ) || ! preg_match( '/^[a-f0-9]{32}$/iD', $hash ) ) {
-				$result['ok'] = false;
-				$result['status'] = 'error';
-				$result['errors'][] = 'Unsafe or invalid checksum manifest. Integrity has not been verified.';
-				return $this->store_result( $result );
-			}
-		}
-
-		$exclusions = $this->get_exclusions();
-		$issues     = [];
-
-		foreach ( $body['checksums'] as $relative_path => $expected_md5 ) {
-
-			// Skip intentionally-removed / security-hardened files
-			if ( ! file_exists( ABSPATH . $relative_path ) && ! is_link( ABSPATH . $relative_path ) && in_array( $relative_path, $exclusions, true ) ) {
-				$result['skipped']++;
-				continue;
-			}
-
-			$result['checked']++;
-			$full_path = ABSPATH . $relative_path;
-
-			if ( is_link( $full_path ) || ! is_file( $full_path ) || ! is_readable( $full_path ) ) {
-				$issues[] = [
-					'type' => file_exists( $full_path ) || is_link( $full_path ) ? 'unreadable' : 'missing',
-					'file' => $relative_path,
-					'msg'  => "Missing, unreadable or linked core file: {$relative_path}",
-				];
-				continue;
-			}
-
-			$actual_md5 = @md5_file( $full_path );
-			if ( $actual_md5 !== strtolower( $expected_md5 ) ) {
-				$issues[] = [
-					'type'     => 'modified',
-					'file'     => $relative_path,
-					'msg'      => "Modified core file: {$relative_path}",
-					'expected' => $expected_md5,
-					'actual'   => $actual_md5,
-				];
-			}
-		}
-
-		$result['issues'] = $issues;
-		$result['ok']     = empty( $issues );
-
-		// Log and notify if issues found
-		if ( ! empty( $issues ) ) {
-			$this->handle_issues( $issues );
-		} else {
-			delete_option( 'mkss_integrity_alert_state' );
-		}
-
-		return $this->store_result( $result );
 	}
 
-	/** Persist scan failures as unknown/error, never as a clean or infected result. */
-	private function store_result( array $result ): array {
-		update_option( 'mkss_last_file_check', current_time( 'mysql' ) );
-		update_option( 'mkss_last_file_check_result', $result, false );
-
-		return $result;
+	public static function clear_scheduled_events() {
+		$timestamp = wp_next_scheduled( self::CRON_HOOK );
+		if ( $timestamp ) {
+			wp_unschedule_event( $timestamp, self::CRON_HOOK );
+		}
 	}
 
-	/**
-	 * Send alert and log when integrity issues are found.
-	 *
-	 * @param array $issues
-	 */
-	private function handle_issues( array $issues ): void {
-		// Log to activity log
-		if ( class_exists( 'MKSS_Activity_Log' ) ) {
-			MKSS_Activity_Log::log(
-				'file_integrity',
-				sprintf( 'File integrity issues found: %d file(s) affected.', count( $issues ) ),
-				2 // high severity
-			);
-		}
+	public function run_scan() {
+        if ( ! MKSS_Settings::instance()->get( 'file_monitor_enabled' ) ) { return; }
+        $result = ( new MKSS_Integrity_Engine() )->run_integrity_check();
+        $modified = array(); $missing = array();
+        foreach ( $result['issues'] as $issue ) {
+            if ( 'missing' === $issue['type'] ) { $missing[] = $issue['file']; }
+            else { $modified[] = $issue['file']; }
+        }
+        $result['time'] = time(); $result['modified'] = $modified; $result['missing'] = $missing;
+        update_option( self::OPTION_RESULTS, $result, false );
+        return $result;
+    }
 
-		if ( ! get_option( 'mkss_notify_on_file_change', true ) ) {
-			return;
+	public function handle_manual_scan() {
+		if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'mkss_run_scan_now' ) ) {
+			wp_die( esc_html__( 'Not allowed.', 'mk-security-shield' ) );
 		}
-		$fingerprints = array_map( static function ( $issue ) {
-			return $issue['file'] . ':' . $issue['type'] . ':' . ( $issue['actual'] ?? '' );
-		}, $issues );
-		sort( $fingerprints );
-		$fingerprint = hash( 'sha256', implode( '|', $fingerprints ) );
-		$previous = get_option( 'mkss_integrity_alert_state', [] );
-		if ( ( $previous['fingerprint'] ?? '' ) === $fingerprint && ( $previous['time'] ?? 0 ) > time() - DAY_IN_SECONDS ) {
-			return;
-		}
-
-		$rows = '';
-		foreach ( $issues as $issue ) {
-			$rows .= "<tr><td style='padding:6px 12px;border-bottom:1px solid #eee;'>" . esc_html( strtoupper( $issue['type'] ) ) . '</td>'
-				. "<td style='padding:6px 12px;border-bottom:1px solid #eee;font-family:monospace;'>" . esc_html( $issue['file'] ) . '</td></tr>';
-		}
-
-		$body = "
-			<p>The file integrity check detected <strong>" . count( $issues ) . " issue(s)</strong> with WordPress core files.</p>
-			<table style='width:100%;border-collapse:collapse;font-size:13px;'>
-				<thead><tr>
-					<th style='text-align:left;padding:8px 12px;background:#f5f5f5;'>Status</th>
-					<th style='text-align:left;padding:8px 12px;background:#f5f5f5;'>File</th>
-				</tr></thead>
-				<tbody>{$rows}</tbody>
-			</table>
-			<p style='margin-top:16px;'>These checksum differences require review; they are not proof of a compromise.
-			Missing optional documentation is ignored, but present excluded files are still checked.</p>
-		";
-
-		MKSS_Helper::send_alert( 'Core File Integrity Alert', $body );
-		MKSS_Helper::send_slack( '⚠️ Core file integrity issues found: ' . count( $issues ) . ' file(s). Check your admin email.' );
-		update_option( 'mkss_integrity_alert_state', [ 'fingerprint' => $fingerprint, 'time' => time() ], false );
-	}
-
-	/**
-	 * Handle manual scan triggered from admin settings page.
-	 */
-	public function handle_manual_scan(): void {
-		if ( ! isset( $_POST['mkss_run_file_check'] ) || ! check_admin_referer( 'mkss_run_file_check' ) ) {
-			return;
-		}
-		if ( ! current_user_can( 'manage_options' ) ) {
-			return;
-		}
-		$result = $this->run_integrity_check();
-		$status = 'complete' !== $result['status'] ? $result['status'] : ( $result['ok'] ? 'ok' : 'issues' );
-		wp_safe_redirect( add_query_arg( [ 'mkss_scan' => $status, 'mkss_count' => count( $result['issues'] ) ], wp_get_referer() ) );
+		$this->run_scan();
+		MKSS_Malware_Scanner::instance()->run_scan();
+		wp_safe_redirect( admin_url( 'admin.php?page=mkss-scan-results&scanned=1' ) );
 		exit;
 	}
 
-	/**
-	 * AJAX handler for quick scan from dashboard.
-	 */
-	public function ajax_run_check(): void {
-		check_ajax_referer( 'mkss_ajax_nonce', 'nonce' );
+	public function add_menu() {
+		add_submenu_page(
+			'mkss-settings',
+			__( 'Scan Results', 'mk-security-shield' ),
+			__( 'Scan Results', 'mk-security-shield' ),
+			'manage_options',
+			'mkss-scan-results',
+			array( $this, 'render_page' )
+		);
+	}
+
+	public function render_page() {
 		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( 'Unauthorized' );
+			return;
 		}
-		$result = $this->run_integrity_check();
-		wp_send_json_success( $result );
+
+		$file_results    = get_option( self::OPTION_RESULTS, array() );
+		$malware_results = get_option( MKSS_Malware_Scanner::OPTION_RESULTS, array() );
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Security Shield — Scan Results', 'mk-security-shield' ); ?></h1>
+
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+				<input type="hidden" name="action" value="mkss_run_scan_now" />
+				<?php wp_nonce_field( 'mkss_run_scan_now' ); ?>
+				<?php submit_button( __( 'Run Scan Now', 'mk-security-shield' ), 'secondary' ); ?>
+			</form>
+
+			<h2><?php esc_html_e( 'Core File Integrity', 'mk-security-shield' ); ?></h2>
+			<?php if ( empty( $file_results ) ) : ?>
+				<p><?php esc_html_e( 'No scan has run yet.', 'mk-security-shield' ); ?></p>
+			<?php else : ?>
+				<p>
+					<?php
+					printf(
+						/* translators: %s: date/time of last scan */
+						esc_html__( 'Last checked: %s', 'mk-security-shield' ),
+						esc_html( wp_date( 'Y-m-d H:i', $file_results['time'] ) )
+					);
+					?>
+				</p>
+				<?php if ( ! empty( $file_results['errors'] ) ) : ?>
+                    <p style="color:#b32d2e;"><?php echo esc_html( implode( ' ', $file_results['errors'] ) ); ?></p>
+                <?php elseif ( empty( $file_results['modified'] ) && empty( $file_results['missing'] ) ) : ?>
+					<p style="color:#1a7f37;"><?php esc_html_e( 'No changes detected in checked WordPress core files. Missing optional documentation is ignored; present documentation and executable files remain checked.', 'mk-security-shield' ); ?></p>
+				<?php else : ?>
+					<ul>
+						<?php foreach ( $file_results['modified'] as $f ) : ?>
+							<li><?php echo esc_html( 'Modified: ' . $f ); ?></li>
+						<?php endforeach; ?>
+						<?php foreach ( $file_results['missing'] as $f ) : ?>
+							<li><?php echo esc_html( 'Missing: ' . $f ); ?></li>
+						<?php endforeach; ?>
+					</ul>
+				<?php endif; ?>
+			<?php endif; ?>
+
+			<h2><?php esc_html_e( 'Malware Pattern Scan', 'mk-security-shield' ); ?></h2>
+			<?php if ( empty( $malware_results ) ) : ?>
+				<p><?php esc_html_e( 'No scan has run yet.', 'mk-security-shield' ); ?></p>
+			<?php else : ?>
+				<p>
+					<?php
+					printf(
+						/* translators: 1: date/time of last scan, 2: number of files scanned */
+						esc_html__( 'Last checked: %1$s — %2$d file(s) scanned.', 'mk-security-shield' ),
+						esc_html( wp_date( 'Y-m-d H:i', $malware_results['time'] ) ),
+						(int) $malware_results['scanned']
+					);
+					?>
+					<?php if ( ! empty( $malware_results['truncated'] ) ) : ?>
+						<em><?php esc_html_e( '(scan stopped early at the file limit — not every file was checked)', 'mk-security-shield' ); ?></em>
+					<?php endif; ?>
+				</p>
+				<?php if ( empty( $malware_results['flagged'] ) ) : ?>
+					<p style="color:#1a7f37;"><?php esc_html_e( 'No suspicious patterns found.', 'mk-security-shield' ); ?></p>
+				<?php else : ?>
+					<table class="widefat striped">
+						<thead>
+							<tr>
+								<th><?php esc_html_e( 'File', 'mk-security-shield' ); ?></th>
+								<th><?php esc_html_e( 'Line', 'mk-security-shield' ); ?></th>
+								<th><?php esc_html_e( 'Pattern', 'mk-security-shield' ); ?></th>
+							</tr>
+						</thead>
+						<tbody>
+						<?php foreach ( $malware_results['flagged'] as $item ) : ?>
+							<tr>
+								<td><?php echo esc_html( $item['file'] ); ?></td>
+								<td><?php echo esc_html( $item['line'] ); ?></td>
+								<td><?php echo esc_html( $item['label'] ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+						</tbody>
+					</table>
+					<p><em><?php esc_html_e( 'These are pattern matches for manual review, not confirmed malware. Verify each file before taking action.', 'mk-security-shield' ); ?></em></p>
+				<?php endif; ?>
+			<?php endif; ?>
+		</div>
+		<?php
 	}
 }

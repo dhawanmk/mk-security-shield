@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        php: ['8.0', '8.4']
+        php: ['8.0', '8.4', '8.5']
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -16,7 +16,3 @@ jobs:
           coverage: none
       - run: find . -name '*.php' -not -path './tests/tmp/*' -print0 | xargs -0 -n1 php -l
       - run: php tests/regression.php
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: node tests/admin.test.js

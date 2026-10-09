@@ -1,99 +1,166 @@
 <?php
-/**
- * Activity Log for MK Security Shield v2.0.
- *
- * @package MK_Security_Shield
- */
-
-defined( 'ABSPATH' ) || exit;
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
 class MKSS_Activity_Log {
 
-	/** Severity levels */
-	const SEV_INFO     = 0;
-	const SEV_LOW      = 1;
-	const SEV_HIGH     = 2;
-	const SEV_CRITICAL = 3;
+	private static $instance = null;
 
-	public function __construct() {
-		// Schedule log cleanup — keep 90 days
-		add_action( 'mkss_daily_scan', [ $this, 'prune_old_logs' ] );
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+		return self::$instance;
 	}
 
-	/**
-	 * Write an entry to the activity log.
-	 *
-	 * @param string $event_type  Machine-readable event slug.
-	 * @param string $description Human-readable description.
-	 * @param int    $severity    0=info, 1=low, 2=high, 3=critical.
-	 */
-	public static function log( string $event_type, string $description, int $severity = 0 ): void {
+	private function __construct() {
+		add_action( 'admin_menu', array( $this, 'add_menu' ), 20 );
+	}
+
+	public static function table_name() {
+		global $wpdb;
+		return $wpdb->prefix . 'mkss_activity_log';
+	}
+
+	public static function create_table() {
+		global $wpdb;
+
+		$table           = self::table_name();
+		$charset_collate = $wpdb->get_charset_collate();
+
+		$sql = "CREATE TABLE {$table} (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			event_time DATETIME NOT NULL,
+			event_type VARCHAR(50) NOT NULL,
+			ip_address VARCHAR(100) NOT NULL,
+			username VARCHAR(191) NULL,
+			message TEXT NULL,
+			PRIMARY KEY  (id),
+			KEY event_type (event_type),
+			KEY event_time (event_time)
+		) {$charset_collate};";
+
+		require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+		dbDelta( $sql );
+	}
+
+	public static function log( $event_type, $message = '', $username = '' ) {
 		global $wpdb;
 
 		$wpdb->insert(
-			$wpdb->prefix . 'mkss_activity_log',
-			[
-				'event_type'  => sanitize_key( $event_type ),
-				'user_id'     => get_current_user_id(),
-				'ip_address'  => MKSS_Helper::get_ip(),
-				'user_agent'  => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '',
-				'description' => sanitize_text_field( $description ),
-				'severity'    => min( 3, max( 0, (int) $severity ) ),
-				'created_at'  => current_time( 'mysql' ),
-			],
-			[ '%s', '%d', '%s', '%s', '%s', '%d', '%s' ]
+			self::table_name(),
+			array(
+				'event_time' => current_time( 'mysql' ),
+				'event_type' => sanitize_key( $event_type ),
+				'ip_address' => MKSS_Helper::get_client_ip(),
+				'username'   => sanitize_text_field( (string) $username ),
+				'message'    => sanitize_textarea_field( (string) $message ),
+			),
+			array( '%s', '%s', '%s', '%s', '%s' )
 		);
 	}
 
-	/**
-	 * Get recent log entries.
-	 *
-	 * @param int    $limit
-	 * @param string $event_type  Optional filter.
-	 * @param int    $min_severity Optional filter.
-	 * @return array
-	 */
-	public static function get_logs( int $limit = 50, string $event_type = '', int $min_severity = -1 ): array {
+	public static function get_entries( $limit = 50, $offset = 0, $event_type = '' ) {
 		global $wpdb;
-		$table = $wpdb->prefix . 'mkss_activity_log';
-		$where = 'WHERE 1=1';
-		$args  = [];
+		$table = self::table_name();
 
-		if ( ! empty( $event_type ) ) {
-			$where .= ' AND event_type = %s';
-			$args[] = $event_type;
-		}
-		if ( $min_severity >= 0 ) {
-			$where .= ' AND severity >= %d';
-			$args[] = $min_severity;
-		}
-
-		$args[] = absint( $limit );
-
-		if ( ! empty( $args ) ) {
-			// Remove the limit arg for prepare — add it separately
-			$limit_val = array_pop( $args );
-			if ( ! empty( $args ) ) {
-				$sql = $wpdb->prepare( "SELECT * FROM `{$table}` {$where} ORDER BY id DESC LIMIT %d", array_merge( $args, [ $limit_val ] ) ); // phpcs:ignore
-			} else {
-				$sql = $wpdb->prepare( "SELECT * FROM `{$table}` ORDER BY id DESC LIMIT %d", $limit_val ); // phpcs:ignore
-			}
-		} else {
-			$sql = $wpdb->prepare( "SELECT * FROM `{$table}` ORDER BY id DESC LIMIT %d", $limit ); // phpcs:ignore
+		if ( $event_type ) {
+			return $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT * FROM {$table} WHERE event_type = %s ORDER BY id DESC LIMIT %d OFFSET %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+					$event_type,
+					$limit,
+					$offset
+				)
+			);
 		}
 
-		return $wpdb->get_results( $sql, ARRAY_A ) ?: []; // phpcs:ignore
+		return $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT * FROM {$table} ORDER BY id DESC LIMIT %d OFFSET %d", // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				$limit,
+				$offset
+			)
+		);
 	}
 
-	/**
-	 * Delete log entries older than $days days.
-	 */
-	public function prune_old_logs( int $days = 90 ): int {
+	public static function count_entries() {
 		global $wpdb;
-		$deleted = $wpdb->query( $wpdb->prepare(
-			"DELETE FROM `{$wpdb->prefix}mkss_activity_log` WHERE created_at < NOW() - INTERVAL %d DAY",
-			$days
-		) );
-		return (int) $deleted;
+		$table = self::table_name();
+		return (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$table}" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+	}
+
+	public function add_menu() {
+		add_submenu_page(
+			'mkss-settings',
+			__( 'Activity Log', 'mk-security-shield' ),
+			__( 'Activity Log', 'mk-security-shield' ),
+			'manage_options',
+			'mkss-activity-log',
+			array( $this, 'render_page' )
+		);
+	}
+
+	public function render_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		$paged    = isset( $_GET['paged'] ) ? max( 1, (int) $_GET['paged'] ) : 1; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+		$per_page = 30;
+		$offset   = ( $paged - 1 ) * $per_page;
+
+		$entries     = self::get_entries( $per_page, $offset );
+		$total       = self::count_entries();
+		$total_pages = max( 1, (int) ceil( $total / $per_page ) );
+		?>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'Security Shield — Activity Log', 'mk-security-shield' ); ?></h1>
+			<table class="widefat striped">
+				<thead>
+					<tr>
+						<th><?php esc_html_e( 'Time', 'mk-security-shield' ); ?></th>
+						<th><?php esc_html_e( 'Event', 'mk-security-shield' ); ?></th>
+						<th><?php esc_html_e( 'IP', 'mk-security-shield' ); ?></th>
+						<th><?php esc_html_e( 'User', 'mk-security-shield' ); ?></th>
+						<th><?php esc_html_e( 'Details', 'mk-security-shield' ); ?></th>
+					</tr>
+				</thead>
+				<tbody>
+					<?php if ( empty( $entries ) ) : ?>
+						<tr><td colspan="5"><?php esc_html_e( 'No events recorded yet.', 'mk-security-shield' ); ?></td></tr>
+					<?php else : ?>
+						<?php foreach ( $entries as $entry ) : ?>
+							<tr>
+								<td><?php echo esc_html( $entry->event_time ); ?></td>
+								<td><?php echo esc_html( $entry->event_type ); ?></td>
+								<td><?php echo esc_html( $entry->ip_address ); ?></td>
+								<td><?php echo esc_html( $entry->username ); ?></td>
+								<td><?php echo esc_html( $entry->message ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+					<?php endif; ?>
+				</tbody>
+			</table>
+
+			<?php if ( $total_pages > 1 ) : ?>
+				<div class="tablenav"><div class="tablenav-pages">
+					<?php
+					echo wp_kses_post(
+						paginate_links(
+							array(
+								'base'    => add_query_arg( 'paged', '%#%' ),
+								'format'  => '',
+								'current' => $paged,
+								'total'   => $total_pages,
+							)
+						)
+					);
+					?>
+				</div></div>
+			<?php endif; ?>
+		</div>
+		<?php
 	}
 }

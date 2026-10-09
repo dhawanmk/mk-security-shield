@@ -1,669 +1,356 @@
 <?php
-/**
- * Admin Settings Page for MK Security Shield v2.0.
- *
- * @package MK_Security_Shield
- */
-
-defined( 'ABSPATH' ) || exit;
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
 class MKSS_Settings {
 
-	public function __construct() {
-		add_action( 'admin_menu', [ $this, 'add_menu' ] );
-		add_action( 'admin_init', [ $this, 'register_settings' ] );
-		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
-		add_action( 'wp_ajax_mkss_save_settings', [ $this, 'ajax_save' ] );
-		add_action( 'wp_ajax_mkss_dismiss_notice', [ $this, 'ajax_dismiss_notice' ] );
-		add_action( 'admin_notices', [ $this, 'admin_notices' ] );
+	const OPTION_KEY = 'mkss_settings';
+
+	private static $instance = null;
+	private $options = array();
+
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+		return self::$instance;
 	}
 
-	/**
-	 * Register admin menu.
-	 */
-	public function add_menu(): void {
+	private function __construct() {
+		$this->options = wp_parse_args( get_option( self::OPTION_KEY, array() ), self::default_settings() );
+
+		add_action( 'admin_menu', array( $this, 'add_menu' ) );
+		add_action( 'admin_init', array( $this, 'register_settings' ) );
+	}
+
+	public static function default_settings() {
+		return array(
+			'login_max_attempts'       => 5,
+			'login_lockout_minutes'    => 20,
+			'login_generic_errors'     => 1,
+			'login_math_captcha'       => 1,
+			'disable_xmlrpc'           => 1,
+			'disable_file_edit'        => 1,
+			'hide_wp_version'          => 1,
+			'disable_user_enumeration' => 1,
+			'restrict_rest_users'      => 1,
+			'security_headers'         => 1,
+			'csp_enabled'              => 0,
+			'csp_value'                => "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: https:;",
+			'firewall_enabled'         => 1,
+			'firewall_mode'            => 'log',
+			'harden_htaccess'          => 1,
+			'file_monitor_enabled'     => 1,
+			'malware_scan_enabled'     => 1,
+			'notify_email'             => get_option( 'admin_email' ),
+			'geo_restriction_enabled'     => 0,
+			'geo_confirmed_cloudflare'    => 0,
+			'geo_host_restores_real_ip'   => 0,
+			'geo_allowed_countries'       => 'IN,NP,LK,AE',
+			'geo_allow_verified_crawlers' => 1,
+            'geo_allow_verified_ai' => 1,
+			'geo_bypass_key'              => wp_generate_password( 32, false ),
+			'geo_block_message'           => __( 'This website is only available to visitors from India, Nepal, Sri Lanka, and the United Arab Emirates. If you believe you are seeing this message in error, please contact the site owner.', 'mk-security-shield' ),
+		);
+	}
+
+	public function get( $key, $default = null ) {
+		return array_key_exists( $key, $this->options ) ? $this->options[ $key ] : $default;
+	}
+
+	public function add_menu() {
 		add_menu_page(
-			__( 'MK Security Shield', 'mk-security-shield' ),
-			__( 'MK Security', 'mk-security-shield' ),
+			__( 'Security Shield', 'mk-security-shield' ),
+			__( 'Security Shield', 'mk-security-shield' ),
 			'manage_options',
-			'mk-security-shield',
-			[ $this, 'render_page' ],
-			'dashicons-shield-alt',
+			'mkss-settings',
+			array( $this, 'render_settings_page' ),
+			'dashicons-shield',
 			80
 		);
-	}
 
-	/**
-	 * Register all settings.
-	 */
-	public function register_settings(): void {
-		$options = [
-			// Firewall
-			'mkss_block_sql_injection'        => 'bool',
-			'mkss_block_xss'                  => 'bool',
-			'mkss_block_directory_traversal'  => 'bool',
-			'mkss_block_bad_bots'             => 'bool',
-			'mkss_block_xmlrpc'               => 'bool',
-			'mkss_block_user_enum'            => 'bool',
-			'mkss_disable_pingback'           => 'bool',
-			'mkss_enable_rest_api_protection' => 'bool',
-			// Login
-			'mkss_max_login_attempts'         => 'int',
-			'mkss_lockout_duration'           => 'int',
-			'mkss_hide_login_errors'          => 'bool',
-			'mkss_notify_on_login_fail'       => 'bool',
-			// Hardening
-			'mkss_remove_wp_version'          => 'bool',
-			'mkss_disable_file_editor'        => 'bool',
-			// File monitor
-			'mkss_notify_on_file_change'      => 'bool',
-			'mkss_security_exclusions'        => 'array_text',
-			// Notifications
-			'mkss_notify_email'               => 'email',
-			'mkss_notify_slack_webhook'       => 'url',
-			// Geo restriction
-			'mkss_geo_restriction_enabled'    => 'bool',
-			'mkss_geo_allow_verified_ai'      => 'bool',
-			'mkss_geo_allowed_countries'      => 'array_text',
-			'mkss_geo_blocked_countries'      => 'array_text',
-			'mkss_geo_mode'                   => 'text',
-		];
-
-		foreach ( $options as $key => $type ) {
-			register_setting(
-				'mkss_settings',
-				$key,
-				[ 'sanitize_callback' => fn( $v ) => MKSS_Helper::sanitize_option( $v, $type ) ]
-			);
-		}
-	}
-
-	/**
-	 * Enqueue admin CSS/JS only on our page.
-	 */
-	public function enqueue_assets( string $hook ): void {
-		if ( strpos( $hook, 'mk-security-shield' ) === false ) {
-			return;
-		}
-		wp_enqueue_style(
-			'mkss-admin',
-			MKSS_PLUGIN_URL . 'assets/css/admin.css',
-			[],
-			MKSS_VERSION
+		add_submenu_page(
+			'mkss-settings',
+			__( 'Settings', 'mk-security-shield' ),
+			__( 'Settings', 'mk-security-shield' ),
+			'manage_options',
+			'mkss-settings',
+			array( $this, 'render_settings_page' )
 		);
-		wp_enqueue_script(
-			'mkss-admin',
-			MKSS_PLUGIN_URL . 'assets/js/admin.js',
-			[ 'jquery' ],
-			MKSS_VERSION,
-			true
+	}
+
+	public function register_settings() {
+		register_setting(
+			'mkss_settings_group',
+			self::OPTION_KEY,
+			array(
+				'type'              => 'array',
+				'sanitize_callback' => array( $this, 'sanitize' ),
+			)
 		);
-		wp_localize_script( 'mkss-admin', 'mkssData', [
-			'nonce'       => wp_create_nonce( 'mkss_ajax_nonce' ),
-			'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
-			'savedText'   => __( 'Settings saved!', 'mk-security-shield' ),
-			'errorText'   => __( 'Error saving settings.', 'mk-security-shield' ),
-			'scanRunning' => __( 'Scanning…', 'mk-security-shield' ),
-		] );
 	}
 
-	/**
-	 * Admin notices for scan results, unlock messages, etc.
-	 */
-	public function admin_notices(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
-			return;
-		}
-		$screen = get_current_screen();
-		if ( ! $screen || strpos( $screen->id, 'mk-security-shield' ) === false ) {
-			return;
-		}
+	public function sanitize( $input ) {
+		$clean = self::default_settings();
 
-		// File scan result notice
-		if ( isset( $_GET['mkss_scan'] ) ) { // phpcs:ignore
-			$status = sanitize_text_field( wp_unslash( $_GET['mkss_scan'] ) ); // phpcs:ignore
-			$count  = isset( $_GET['mkss_count'] ) ? (int) $_GET['mkss_count'] : 0; // phpcs:ignore
-			if ( 'ok' === $status ) {
-				echo '<div class="notice notice-success is-dismissible"><p><strong>' . esc_html__( 'File Integrity OK', 'mk-security-shield' ) . '</strong> — ' . esc_html__( 'No issues found.', 'mk-security-shield' ) . '</p></div>';
-			} elseif ( in_array( $status, [ 'error', 'deferred' ], true ) ) {
-				$result = get_option( 'mkss_last_file_check_result', [] );
-				echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html( implode( ' ', $result['errors'] ?? [ 'Integrity check did not complete.' ] ) ) . '</p></div>';
-			} else {
-				echo '<div class="notice notice-error is-dismissible"><p><strong>' . esc_html__( 'File Integrity Issues Found', 'mk-security-shield' ) . '</strong> — ' . sprintf( esc_html__( '%d file(s) modified or missing. Check the activity log.', 'mk-security-shield' ), $count ) . '</p></div>';
-			}
-		}
+		$bool_fields = array(
+			'login_generic_errors',
+			'login_math_captcha',
+			'disable_xmlrpc',
+			'disable_file_edit',
+			'hide_wp_version',
+			'disable_user_enumeration',
+			'restrict_rest_users',
+			'security_headers',
+			'csp_enabled',
+			'firewall_enabled',
+			'harden_htaccess',
+			'file_monitor_enabled',
+			'malware_scan_enabled',
+			'geo_restriction_enabled',
+			'geo_confirmed_cloudflare',
+			'geo_host_restores_real_ip',
+			'geo_allow_verified_crawlers',
+            'geo_allow_verified_ai',
+		);
 
-		// IP unlock notice
-		if ( isset( $_GET['mkss_msg'] ) && 'ip_unlocked' === $_GET['mkss_msg'] ) { // phpcs:ignore
-			echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'IP address has been unblocked.', 'mk-security-shield' ) . '</p></div>';
-		}
-	}
-
-	/**
-	 * AJAX save handler.
-	 */
-	public function ajax_save(): void {
-		check_ajax_referer( 'mkss_ajax_nonce', 'nonce' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( 'Unauthorized' );
-		}
-
-		$posted = isset( $_POST['settings'] ) ? wp_unslash( $_POST['settings'] ) : []; // phpcs:ignore
-		if ( ! is_array( $posted ) ) {
-			wp_send_json_error( 'Invalid data' );
-		}
-		foreach ( $posted as $value ) {
-			if ( ! is_scalar( $value ) ) {
-				wp_send_json_error( 'Invalid setting value' );
-			}
-		}
-		if ( ! empty( $posted['mkss_notify_slack_webhook'] ) ) {
-			$url = esc_url_raw( $posted['mkss_notify_slack_webhook'] );
-			if ( 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) || ! in_array( wp_parse_url( $url, PHP_URL_HOST ), [ 'hooks.slack.com', 'hooks.slack-gov.com' ], true ) ) {
-				wp_send_json_error( 'Use an HTTPS Slack incoming webhook URL.' );
-			}
-		}
-
-		$bool_fields = [
-			'mkss_block_sql_injection', 'mkss_block_xss', 'mkss_block_directory_traversal',
-			'mkss_block_bad_bots', 'mkss_block_xmlrpc', 'mkss_block_user_enum',
-			'mkss_disable_pingback', 'mkss_enable_rest_api_protection',
-			'mkss_hide_login_errors', 'mkss_notify_on_login_fail',
-			'mkss_remove_wp_version', 'mkss_disable_file_editor',
-			'mkss_notify_on_file_change', 'mkss_geo_restriction_enabled', 'mkss_geo_allow_verified_ai',
-		];
 		foreach ( $bool_fields as $field ) {
-			if ( array_key_exists( $field, $posted ) ) {
-				update_option( $field, in_array( $posted[$field], [ true, 1, '1' ], true ) );
-			}
+			$clean[ $field ] = ! empty( $input[ $field ] ) ? 1 : 0;
 		}
 
-		$int_fields = [ 'mkss_max_login_attempts' => 5, 'mkss_lockout_duration' => 30 ];
-		foreach ( $int_fields as $field => $default ) {
-			if ( isset( $posted[$field] ) ) {
-				$maximum = 'mkss_max_login_attempts' === $field ? 20 : 10080;
-				update_option( $field, min( $maximum, max( 1, (int) $posted[$field] ) ) );
-			}
+		$clean['login_max_attempts']    = max( 3, min( 20, (int) ( $input['login_max_attempts'] ?? 5 ) ) );
+		$clean['login_lockout_minutes'] = max( 1, min( 1440, (int) ( $input['login_lockout_minutes'] ?? 20 ) ) );
+		$clean['firewall_mode']         = in_array( $input['firewall_mode'] ?? 'log', array( 'block', 'log' ), true ) ? ( $input['firewall_mode'] ?? 'log' ) : 'log';
+		$clean['csp_value']             = isset( $input['csp_value'] ) ? sanitize_text_field( wp_unslash( $input['csp_value'] ) ) : $clean['csp_value'];
+		$clean['notify_email']          = is_email( $input['notify_email'] ?? '' ) ? sanitize_email( $input['notify_email'] ) : get_option( 'admin_email' );
+
+		$codes = array_filter(
+			array_map(
+				function ( $c ) {
+					$c = strtoupper( trim( $c ) );
+					return preg_match( '/^[A-Z]{2}$/', $c ) ? $c : '';
+				},
+				explode( ',', (string) ( $input['geo_allowed_countries'] ?? '' ) )
+			)
+		);
+		$clean['geo_allowed_countries'] = $codes ? implode( ',', array_unique( $codes ) ) : 'IN,NP,LK,AE';
+
+		if ( ! empty( $input['geo_bypass_key_regenerate'] ) ) {
+			$clean['geo_bypass_key'] = wp_generate_password( 32, false );
+		} else {
+			$submitted_key           = isset( $input['geo_bypass_key'] ) ? sanitize_text_field( wp_unslash( $input['geo_bypass_key'] ) ) : '';
+			$previous_key            = isset( $this->options['geo_bypass_key'] ) ? $this->options['geo_bypass_key'] : '';
+			$clean['geo_bypass_key'] = ( strlen( $submitted_key ) >= 12 ) ? $submitted_key : ( $previous_key ?: wp_generate_password( 32, false ) );
 		}
 
-		if ( ! empty( $posted['mkss_notify_email'] ) ) {
-			update_option( 'mkss_notify_email', sanitize_email( $posted['mkss_notify_email'] ) );
-		}
-		if ( isset( $posted['mkss_notify_slack_webhook'] ) ) {
-			update_option( 'mkss_notify_slack_webhook', esc_url_raw( $posted['mkss_notify_slack_webhook'] ) );
+		$clean['geo_block_message'] = isset( $input['geo_block_message'] ) && strlen( trim( $input['geo_block_message'] ) ) > 0
+			? sanitize_textarea_field( wp_unslash( $input['geo_block_message'] ) )
+			: $clean['geo_block_message'];
+
+		if ( ! empty( $clean['harden_htaccess'] ) ) {
+			MKSS_Hardening::write_htaccess_rules();
+		} else {
+			MKSS_Hardening::remove_htaccess_rules();
 		}
 
-		// Array fields (newline separated)
-		foreach ( [ 'mkss_security_exclusions', 'mkss_geo_allowed_countries', 'mkss_geo_blocked_countries' ] as $field ) {
-			if ( isset( $posted[ $field ] ) ) {
-				$lines = 'mkss_security_exclusions' === $field
-					? array_filter( array_map( 'trim', array_map( 'sanitize_text_field', preg_split( '/[\r\n,]+/', (string) $posted[$field] ) ) ) )
-					: MKSS_Helper::country_codes( $posted[$field] );
-				update_option( $field, array_values( $lines ) );
-			}
-		}
-		if ( isset( $posted['mkss_geo_mode'] ) ) {
-			update_option( 'mkss_geo_mode', in_array( $posted['mkss_geo_mode'], [ 'allowlist', 'blocklist' ], true ) ? $posted['mkss_geo_mode'] : 'blocklist' );
-		}
-
-		MKSS_Activity_Log::log( 'settings_saved', 'Admin saved plugin settings.', 0 );
-		wp_send_json_success( __( 'Settings saved.', 'mk-security-shield' ) );
+		do_action( 'litespeed_purge_all' );
+		return $clean;
 	}
 
-	/**
-	 * Dismiss admin notice via AJAX.
-	 */
-	public function ajax_dismiss_notice(): void {
-		check_ajax_referer( 'mkss_ajax_nonce', 'nonce' );
-		wp_send_json_success();
-	}
-
-	/**
-	 * Render the main admin page.
-	 */
-	public function render_page(): void {
+	public function render_settings_page() {
 		if ( ! current_user_can( 'manage_options' ) ) {
 			return;
 		}
-		$active_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'dashboard'; // phpcs:ignore
+		$o = $this->options;
 		?>
-		<div class="wrap mkss-wrap">
-			<h1 class="mkss-title">
-				<span class="dashicons dashicons-shield-alt"></span>
-				<?php esc_html_e( 'MK Security Shield', 'mk-security-shield' ); ?>
-				<span class="mkss-version">v<?php echo esc_html( MKSS_VERSION ); ?></span>
-			</h1>
+		<div class="wrap">
+			<h1><?php esc_html_e( 'MK Security Shield', 'mk-security-shield' ); ?> <small><?php echo esc_html( MKSS_VERSION ); ?></small></h1>
+			<p>
+				<?php esc_html_e( 'Hardens common WordPress attack surfaces. No plugin can guarantee protection against every threat — keep WordPress, your theme, and all plugins updated, use strong unique passwords, and maintain off-site backups.', 'mk-security-shield' ); ?>
+			</p>
 
-			<nav class="mkss-tabs nav-tab-wrapper">
-				<?php
-				$tabs = [
-					'dashboard'  => __( '🛡 Dashboard', 'mk-security-shield' ),
-					'firewall'   => __( '🔥 Firewall', 'mk-security-shield' ),
-					'login'      => __( '🔐 Login Protection', 'mk-security-shield' ),
-					'hardening'  => __( '🔩 Hardening', 'mk-security-shield' ),
-					'files'      => __( '📁 File Monitor', 'mk-security-shield' ),
-					'geo'        => __( '🌍 Geo Restriction', 'mk-security-shield' ),
-					'notify'     => __( '🔔 Notifications', 'mk-security-shield' ),
-					'activity'   => __( '📋 Activity Log', 'mk-security-shield' ),
-					'blocked'    => __( '🚫 Blocked IPs', 'mk-security-shield' ),
-				];
-				foreach ( $tabs as $slug => $label ) {
-					$class = ( $active_tab === $slug ) ? 'nav-tab nav-tab-active' : 'nav-tab';
-					printf(
-						'<a href="%s" class="%s">%s</a>',
-						esc_url( admin_url( 'admin.php?page=mk-security-shield&tab=' . $slug ) ),
-						esc_attr( $class ),
-						esc_html( $label )
-					);
-				}
-				?>
-			</nav>
+			<form method="post" action="options.php">
+				<?php settings_fields( 'mkss_settings_group' ); ?>
 
-			<div class="mkss-content">
-				<?php
-				switch ( $active_tab ) {
-					case 'dashboard':
-						$this->render_dashboard();
-						break;
-					case 'firewall':
-						$this->render_firewall();
-						break;
-					case 'login':
-						$this->render_login();
-						break;
-					case 'hardening':
-						$this->render_hardening();
-						break;
-					case 'files':
-						$this->render_files();
-						break;
-					case 'geo':
-						$this->render_geo();
-						break;
-					case 'notify':
-						$this->render_notify();
-						break;
-					case 'activity':
-						$this->render_activity();
-						break;
-					case 'blocked':
-						$this->render_blocked();
-						break;
-				}
-				?>
-			</div>
-		</div>
-		<?php
-	}
-
-	/* ---------------------------------------------------------------
-	 * TAB RENDERERS
-	 * ------------------------------------------------------------- */
-
-	private function render_dashboard(): void {
-		$last_check  = get_option( 'mkss_last_file_check', '' );
-		$last_result = get_option( 'mkss_last_file_check_result', [] );
-		$log_counts  = $this->get_log_counts_24h();
-		?>
-		<div class="mkss-dashboard-grid">
-
-			<div class="mkss-card mkss-card-<?php echo ( ! empty( $last_result['ok'] ) ) ? 'ok' : ( empty( $last_result ) ? 'neutral' : 'warn' ); ?>">
-				<h3><?php esc_html_e( 'File Integrity', 'mk-security-shield' ); ?></h3>
-				<?php if ( empty( $last_result ) ) : ?>
-					<p><?php esc_html_e( 'No scan run yet.', 'mk-security-shield' ); ?></p>
-				<?php elseif ( ! empty( $last_result['errors'] ) ) : ?>
-					<p class="mkss-warn"><?php echo esc_html( implode( ' ', $last_result['errors'] ) ); ?></p>
-				<?php elseif ( $last_result['ok'] ) : ?>
-					<p class="mkss-ok">✅ <?php esc_html_e( 'All core files intact.', 'mk-security-shield' ); ?></p>
-				<?php else : ?>
-					<p class="mkss-warn">⚠️ <?php echo esc_html( count( $last_result['issues'] ) ); ?> <?php esc_html_e( 'issue(s) found.', 'mk-security-shield' ); ?></p>
-				<?php endif; ?>
-				<?php if ( $last_check ) : ?>
-					<p class="mkss-sub"><?php esc_html_e( 'Last check:', 'mk-security-shield' ); ?> <?php echo esc_html( $last_check ); ?></p>
-				<?php endif; ?>
-				<form method="post" action="">
-					<?php wp_nonce_field( 'mkss_run_file_check' ); ?>
-					<button type="submit" name="mkss_run_file_check" value="1" class="button button-secondary mkss-scan-btn">
-						<?php esc_html_e( 'Run Scan Now', 'mk-security-shield' ); ?>
-					</button>
-				</form>
-			</div>
-
-			<div class="mkss-card">
-				<h3><?php esc_html_e( 'Last 24 Hours', 'mk-security-shield' ); ?></h3>
-				<ul class="mkss-stats">
-					<li>🔐 <?php echo esc_html( $log_counts['login_failed'] ); ?> <?php esc_html_e( 'Failed logins', 'mk-security-shield' ); ?></li>
-					<li>🚫 <?php echo esc_html( $log_counts['ip_blocked'] ); ?> <?php esc_html_e( 'IPs blocked', 'mk-security-shield' ); ?></li>
-					<li>🔥 <?php echo esc_html( $log_counts['firewall_block'] ); ?> <?php esc_html_e( 'Firewall blocks', 'mk-security-shield' ); ?></li>
-					<li>✅ <?php echo esc_html( $log_counts['login_success'] ); ?> <?php esc_html_e( 'Successful logins', 'mk-security-shield' ); ?></li>
-				</ul>
-			</div>
-
-			<div class="mkss-card">
-				<h3><?php esc_html_e( 'Plugin Status', 'mk-security-shield' ); ?></h3>
-				<ul class="mkss-stats">
-					<li>🔥 <?php esc_html_e( 'Firewall:', 'mk-security-shield' ); ?> <strong><?php echo get_option( 'mkss_block_sql_injection', true ) ? '✅ ON' : '❌ OFF'; ?></strong></li>
-					<li>🔐 <?php esc_html_e( 'Login Protection:', 'mk-security-shield' ); ?> <strong>✅ ON</strong></li>
-					<li>📁 <?php esc_html_e( 'File Monitor:', 'mk-security-shield' ); ?> <strong>✅ ON</strong></li>
-					<li>🌍 <?php esc_html_e( 'Geo Block:', 'mk-security-shield' ); ?> <strong><?php echo get_option( 'mkss_geo_restriction_enabled', false ) ? '✅ ON' : '⬜ OFF'; ?></strong></li>
-				</ul>
-			</div>
-
-			<div class="mkss-card">
-				<h3><?php esc_html_e( 'Quick Info', 'mk-security-shield' ); ?></h3>
-				<ul class="mkss-stats">
-					<li>🌐 <?php esc_html_e( 'PHP:', 'mk-security-shield' ); ?> <strong><?php echo esc_html( PHP_VERSION ); ?></strong></li>
-					<li>⚙️ <?php esc_html_e( 'WordPress:', 'mk-security-shield' ); ?> <strong><?php echo esc_html( get_bloginfo( 'version' ) ); ?></strong></li>
-					<li>🔒 <?php esc_html_e( 'HTTPS:', 'mk-security-shield' ); ?> <strong><?php echo is_ssl() ? '✅' : '⚠️ No'; ?></strong></li>
-					<li>🛡 <?php esc_html_e( 'Plugin:', 'mk-security-shield' ); ?> <strong>v<?php echo esc_html( MKSS_VERSION ); ?></strong></li>
-				</ul>
-			</div>
-
-		</div>
-		<?php
-	}
-
-	private function render_firewall(): void {
-		?>
-		<form id="mkss-form-firewall" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'Web Application Firewall', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<?php
-				$this->toggle_row( 'mkss_block_sql_injection', __( 'Block SQL Injection', 'mk-security-shield' ), __( 'Block common SQL injection patterns in URLs and query strings.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_block_xss', __( 'Block XSS Attacks', 'mk-security-shield' ), __( 'Block cross-site scripting attempts in request data.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_block_directory_traversal', __( 'Block Directory Traversal', 'mk-security-shield' ), __( 'Prevent <code>../</code> path traversal attacks.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_block_bad_bots', __( 'Block Malicious Bots', 'mk-security-shield' ), __( 'Block known scanner user-agents: sqlmap, nikto, masscan, etc.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_block_xmlrpc', __( 'Disable XML-RPC', 'mk-security-shield' ), __( 'Block all XML-RPC access (recommended unless you use Jetpack).', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_block_user_enum', __( 'Block User Enumeration', 'mk-security-shield' ), __( 'Prevent <code>?author=1</code> username discovery.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_disable_pingback', __( 'Disable Pingback', 'mk-security-shield' ), __( 'Remove X-Pingback header and disable pingback functionality.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_enable_rest_api_protection', __( 'Restrict REST API', 'mk-security-shield' ), __( 'Require authentication for all REST API requests (may break some plugins).', 'mk-security-shield' ) );
-				?>
-			</table>
-
-			<?php $this->save_button( 'firewall' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_login(): void {
-		$max      = (int) get_option( 'mkss_max_login_attempts', 5 );
-		$duration = (int) get_option( 'mkss_lockout_duration', 30 );
-		?>
-		<form id="mkss-form-login" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'Login Protection', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<tr>
-					<th><?php esc_html_e( 'Max Login Attempts', 'mk-security-shield' ); ?></th>
-					<td>
-						<input type="number" name="mkss_max_login_attempts" value="<?php echo esc_attr( $max ); ?>" min="1" max="20" class="small-text" />
-						<p class="description"><?php esc_html_e( 'Number of failures before IP is locked out.', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th><?php esc_html_e( 'Lockout Duration (minutes)', 'mk-security-shield' ); ?></th>
-					<td>
-						<input type="number" name="mkss_lockout_duration" value="<?php echo esc_attr( $duration ); ?>" min="1" max="10080" class="small-text" />
-						<p class="description"><?php esc_html_e( 'How long to block an IP after too many failures.', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-				<?php
-				$this->toggle_row( 'mkss_hide_login_errors', __( 'Hide Login Errors', 'mk-security-shield' ), __( 'Replace specific login errors with a generic message.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_notify_on_login_fail', __( 'Email on Repeated Failures', 'mk-security-shield' ), __( 'Send an email alert when repeated login failures are detected.', 'mk-security-shield' ) );
-				?>
-			</table>
-
-			<?php $this->save_button( 'login' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_hardening(): void {
-		?>
-		<form id="mkss-form-hardening" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'WordPress Hardening', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<?php
-				$this->toggle_row( 'mkss_remove_wp_version', __( 'Remove WordPress Version', 'mk-security-shield' ), __( 'Remove the WP version from head, RSS feed, and footer.', 'mk-security-shield' ) );
-				$this->toggle_row( 'mkss_disable_file_editor', __( 'Disable Theme/Plugin Editor', 'mk-security-shield' ), __( 'Prevent editing theme/plugin files from wp-admin.', 'mk-security-shield' ) );
-				?>
-			</table>
-
-			<p class="description"><?php esc_html_e( 'Additional hardening (HTTP security headers, noindex on login, application passwords disabled) are always enabled.', 'mk-security-shield' ); ?></p>
-
-			<?php $this->save_button( 'hardening' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_files(): void {
-		$exclusions = (array) get_option( 'mkss_security_exclusions', [] );
-		?>
-		<form id="mkss-form-files" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'File Integrity Monitor', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<?php $this->toggle_row( 'mkss_notify_on_file_change', __( 'Email on File Change', 'mk-security-shield' ), __( 'Send email alert when core file modifications are detected.', 'mk-security-shield' ) ); ?>
-				<tr>
-					<th><?php esc_html_e( 'Security Exclusions', 'mk-security-shield' ); ?></th>
-					<td>
-						<textarea name="mkss_security_exclusions" rows="6" cols="40" class="large-text code"><?php echo esc_textarea( implode( "\n", $exclusions ) ); ?></textarea>
-						<p class="description">
-							<?php esc_html_e( 'Files intentionally removed for security (one per line). These will never trigger a missing-file alert.', 'mk-security-shield' ); ?><br>
-							<strong><?php esc_html_e( 'Missing-only exclusions (present files are still verified):', 'mk-security-shield' ); ?></strong> readme.html, license.txt, wp-config-sample.php
-						</p>
-					</td>
-				</tr>
-			</table>
-
-			<?php $this->save_button( 'files' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_geo(): void {
-		$allowed  = (array) get_option( 'mkss_geo_allowed_countries', [] );
-		$blocked  = (array) get_option( 'mkss_geo_blocked_countries', [] );
-		$mode     = get_option( 'mkss_geo_mode', 'blocklist' );
-		?>
-		<form id="mkss-form-geo" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'Geo Restriction', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<?php $this->toggle_row( 'mkss_geo_restriction_enabled', __( 'Enable Geo Restriction', 'mk-security-shield' ), __( 'Block or allow visitors based on country.', 'mk-security-shield' ) ); ?>
-				<?php $this->toggle_row( 'mkss_geo_allow_verified_ai', __( 'Allow Verified AI Browsing', 'mk-security-shield' ), __( 'Allow Claude-User, Claude-SearchBot, ChatGPT-User and OAI-SearchBot on public GET/HEAD pages after checking official IP ranges. Firewall and login protections still apply. Training crawlers are not included. Unknown countries are allowed if geolocation is unavailable.', 'mk-security-shield' ) ); ?>
-				<tr>
-					<th><?php esc_html_e( 'Mode', 'mk-security-shield' ); ?></th>
-					<td>
-						<select name="mkss_geo_mode">
-							<option value="blocklist" <?php selected( $mode, 'blocklist' ); ?>><?php esc_html_e( 'Blocklist — block specific countries', 'mk-security-shield' ); ?></option>
-							<option value="allowlist" <?php selected( $mode, 'allowlist' ); ?>><?php esc_html_e( 'Allowlist — only allow specific countries', 'mk-security-shield' ); ?></option>
-						</select>
-					</td>
-				</tr>
-				<tr>
-					<th><?php esc_html_e( 'Blocked Countries', 'mk-security-shield' ); ?></th>
-					<td>
-						<textarea name="mkss_geo_blocked_countries" rows="5" cols="30" class="code"><?php echo esc_textarea( implode( "\n", $blocked ) ); ?></textarea>
-						<p class="description"><?php esc_html_e( 'Two-letter country codes, one per line (e.g. CN, RU, KP).', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th><?php esc_html_e( 'Allowed Countries', 'mk-security-shield' ); ?></th>
-					<td>
-						<textarea name="mkss_geo_allowed_countries" rows="5" cols="30" class="code"><?php echo esc_textarea( implode( "\n", $allowed ) ); ?></textarea>
-						<p class="description"><?php esc_html_e( 'Used in Allowlist mode — only these countries can access the site.', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-			</table>
-
-			<?php $this->save_button( 'geo' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_notify(): void {
-		$email   = get_option( 'mkss_notify_email', get_bloginfo( 'admin_email' ) );
-		$slack   = get_option( 'mkss_notify_slack_webhook', '' );
-		?>
-		<form id="mkss-form-notify" class="mkss-settings-form">
-			<h2><?php esc_html_e( 'Notifications', 'mk-security-shield' ); ?></h2>
-
-			<table class="form-table">
-				<tr>
-					<th><?php esc_html_e( 'Alert Email', 'mk-security-shield' ); ?></th>
-					<td>
-						<input type="email" name="mkss_notify_email" value="<?php echo esc_attr( $email ); ?>" class="regular-text" />
-						<p class="description"><?php esc_html_e( 'Security alerts will be sent here.', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-				<tr>
-					<th><?php esc_html_e( 'Slack Webhook URL', 'mk-security-shield' ); ?></th>
-					<td>
-						<input type="url" name="mkss_notify_slack_webhook" value="<?php echo esc_attr( $slack ); ?>" class="regular-text" placeholder="https://hooks.slack.com/services/..." />
-						<p class="description"><?php esc_html_e( 'Optional: paste your Slack Incoming Webhook URL for real-time alerts.', 'mk-security-shield' ); ?></p>
-					</td>
-				</tr>
-			</table>
-
-			<?php $this->save_button( 'notify' ); ?>
-		</form>
-		<?php
-	}
-
-	private function render_activity(): void {
-		$min_sev = isset( $_GET['sev'] ) ? (int) $_GET['sev'] : -1; // phpcs:ignore
-		$logs    = MKSS_Activity_Log::get_logs( 100, '', $min_sev );
-		$sev_labels = [ 0 => 'Info', 1 => 'Low', 2 => 'High', 3 => 'Critical' ];
-		$sev_colors = [ 0 => '#aaa', 1 => '#f39c12', 2 => '#e67e22', 3 => '#e74c3c' ];
-		?>
-		<h2><?php esc_html_e( 'Activity Log', 'mk-security-shield' ); ?></h2>
-		<p>
-			<?php esc_html_e( 'Filter:', 'mk-security-shield' ); ?>
-			<?php foreach ( [ -1 => 'All', 2 => 'High+', 3 => 'Critical' ] as $v => $l ) : ?>
-				<a href="<?php echo esc_url( add_query_arg( [ 'tab' => 'activity', 'sev' => $v ] ) ); ?>" class="button button-small <?php echo $min_sev === $v ? 'button-primary' : ''; ?>"><?php echo esc_html( $l ); ?></a>
-			<?php endforeach; ?>
-		</p>
-		<?php if ( empty( $logs ) ) : ?>
-			<p><?php esc_html_e( 'No log entries found.', 'mk-security-shield' ); ?></p>
-		<?php else : ?>
-			<table class="wp-list-table widefat fixed striped mkss-log-table">
-				<thead>
+				<h2><?php esc_html_e( 'Login Security', 'mk-security-shield' ); ?></h2>
+				<table class="form-table">
 					<tr>
-						<th><?php esc_html_e( 'Time', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Event', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Description', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'IP', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Severity', 'mk-security-shield' ); ?></th>
+						<th><?php esc_html_e( 'Max failed attempts', 'mk-security-shield' ); ?></th>
+						<td><input type="number" min="3" max="20" name="mkss_settings[login_max_attempts]" value="<?php echo esc_attr( $o['login_max_attempts'] ); ?>" /></td>
 					</tr>
-				</thead>
-				<tbody>
-					<?php foreach ( $logs as $log ) : ?>
 					<tr>
-						<td><?php echo esc_html( $log['created_at'] ); ?></td>
-						<td><code><?php echo esc_html( $log['event_type'] ); ?></code></td>
-						<td><?php echo esc_html( $log['description'] ); ?></td>
-						<td><?php echo esc_html( $log['ip_address'] ); ?></td>
+						<th><?php esc_html_e( 'Lockout duration (minutes)', 'mk-security-shield' ); ?></th>
+						<td><input type="number" min="1" max="1440" name="mkss_settings[login_lockout_minutes]" value="<?php echo esc_attr( $o['login_lockout_minutes'] ); ?>" /></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Generic login errors', 'mk-security-shield' ); ?></th>
 						<td>
-							<span style="color:<?php echo esc_attr( $sev_colors[ $log['severity'] ] ?? '#aaa' ); ?>; font-weight:bold;">
-								<?php echo esc_html( $sev_labels[ $log['severity'] ] ?? '?' ); ?>
-							</span>
+							<label>
+								<input type="checkbox" name="mkss_settings[login_generic_errors]" value="1" <?php checked( $o['login_generic_errors'], 1 ); ?> />
+								<?php esc_html_e( 'Hide whether the username or password was wrong (prevents user enumeration via login errors)', 'mk-security-shield' ); ?>
+							</label>
 						</td>
 					</tr>
-					<?php endforeach; ?>
-				</tbody>
-			</table>
-		<?php endif; ?>
-		<?php
-	}
-
-	private function render_blocked(): void {
-		global $wpdb;
-		$table = $wpdb->prefix . 'mkss_ip_blocks';
-		$rows  = $wpdb->get_results( "SELECT * FROM `{$table}` WHERE blocked_until > NOW() ORDER BY id DESC LIMIT 100", ARRAY_A ); // phpcs:ignore
-		?>
-		<h2><?php esc_html_e( 'Currently Blocked IPs', 'mk-security-shield' ); ?></h2>
-		<?php if ( empty( $rows ) ) : ?>
-			<p><?php esc_html_e( 'No IPs currently blocked.', 'mk-security-shield' ); ?></p>
-		<?php else : ?>
-			<table class="wp-list-table widefat fixed striped">
-				<thead>
 					<tr>
-						<th><?php esc_html_e( 'IP Address', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Reason', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Blocked Until', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Attempts', 'mk-security-shield' ); ?></th>
-						<th><?php esc_html_e( 'Action', 'mk-security-shield' ); ?></th>
-					</tr>
-				</thead>
-				<tbody>
-					<?php foreach ( $rows as $row ) : ?>
-					<tr>
-						<td><strong><?php echo esc_html( $row['ip_address'] ); ?></strong></td>
-						<td><?php echo esc_html( $row['reason'] ); ?></td>
-						<td><?php echo esc_html( $row['blocked_until'] ); ?></td>
-						<td><?php echo esc_html( $row['attempts'] ); ?></td>
+						<th><?php esc_html_e( 'Math challenge on login', 'mk-security-shield' ); ?></th>
 						<td>
-							<a href="<?php echo esc_url( wp_nonce_url( admin_url( 'admin-post.php?action=mkss_unlock_ip&ip=' . urlencode( $row['ip_address'] ) ), 'mkss_unlock_ip' ) ); ?>" class="button button-small">
-								<?php esc_html_e( 'Unblock', 'mk-security-shield' ); ?>
-							</a>
+							<label>
+								<input type="checkbox" name="mkss_settings[login_math_captcha]" value="1" <?php checked( $o['login_math_captcha'], 1 ); ?> />
+								<?php esc_html_e( 'Adds a simple arithmetic question to the login form. This is a basic bot deterrent, not a substitute for a real CAPTCHA or Two-Factor Authentication.', 'mk-security-shield' ); ?>
+							</label>
 						</td>
 					</tr>
-					<?php endforeach; ?>
-				</tbody>
-			</table>
-		<?php endif; ?>
+				</table>
+
+				<h2><?php esc_html_e( 'Hardening', 'mk-security-shield' ); ?></h2>
+				<table class="form-table">
+					<tr>
+						<th><?php esc_html_e( 'Disable XML-RPC', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[disable_xmlrpc]" value="1" <?php checked( $o['disable_xmlrpc'], 1 ); ?> /> <?php esc_html_e( 'Blocks xmlrpc.php, a common brute-force and DDoS amplification target', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Disable theme/plugin file editor', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[disable_file_edit]" value="1" <?php checked( $o['disable_file_edit'], 1 ); ?> /></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Hide WordPress version', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[hide_wp_version]" value="1" <?php checked( $o['hide_wp_version'], 1 ); ?> /></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Prevent username enumeration', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[disable_user_enumeration]" value="1" <?php checked( $o['disable_user_enumeration'], 1 ); ?> /> <?php esc_html_e( 'Blocks ?author=N probing', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Restrict REST API user data', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[restrict_rest_users]" value="1" <?php checked( $o['restrict_rest_users'], 1 ); ?> /> <?php esc_html_e( 'Blocks /wp-json/wp/v2/users for logged-out visitors', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Security headers', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[security_headers]" value="1" <?php checked( $o['security_headers'], 1 ); ?> /></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Content-Security-Policy', 'mk-security-shield' ); ?></th>
+						<td>
+							<label>
+								<input type="checkbox" name="mkss_settings[csp_enabled]" value="1" <?php checked( $o['csp_enabled'], 1 ); ?> />
+								<?php esc_html_e( 'Enable (test thoroughly — an incorrect policy can break page assets, embeds, and third-party scripts)', 'mk-security-shield' ); ?>
+							</label><br/>
+							<input type="text" class="large-text" name="mkss_settings[csp_value]" value="<?php echo esc_attr( $o['csp_value'] ); ?>" />
+						</td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Harden .htaccess (Apache only)', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[harden_htaccess]" value="1" <?php checked( $o['harden_htaccess'], 1 ); ?> /> <?php esc_html_e( 'Blocks direct access to wp-config.php and log/backup files, disables directory listing, and blocks PHP execution inside the uploads folder. Nginx users must apply equivalent rules manually.', 'mk-security-shield' ); ?></label></td>
+					</tr>
+				</table>
+
+				<h2><?php esc_html_e( 'Firewall (beta)', 'mk-security-shield' ); ?></h2>
+				<table class="form-table">
+					<tr>
+						<th><?php esc_html_e( 'Enable request filtering', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[firewall_enabled]" value="1" <?php checked( $o['firewall_enabled'], 1 ); ?> /> <?php esc_html_e( 'Blocks requests containing common SQL injection / path traversal / code injection patterns in the URL, query string, or POST body', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Mode', 'mk-security-shield' ); ?></th>
+						<td>
+							<select name="mkss_settings[firewall_mode]">
+								<option value="log" <?php selected( $o['firewall_mode'], 'log' ); ?>><?php esc_html_e( 'Log only (recommended to start — review Activity Log for false positives)', 'mk-security-shield' ); ?></option>
+								<option value="block" <?php selected( $o['firewall_mode'], 'block' ); ?>><?php esc_html_e( 'Block matching requests', 'mk-security-shield' ); ?></option>
+							</select>
+						</td>
+					</tr>
+				</table>
+
+				<h2><?php esc_html_e( 'Monitoring', 'mk-security-shield' ); ?></h2>
+				<table class="form-table">
+					<tr>
+						<th><?php esc_html_e( 'Core file integrity monitoring', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[file_monitor_enabled]" value="1" <?php checked( $o['file_monitor_enabled'], 1 ); ?> /> <?php esc_html_e( 'Daily check of WordPress core files against official WordPress.org checksums', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Malware pattern scanning', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[malware_scan_enabled]" value="1" <?php checked( $o['malware_scan_enabled'], 1 ); ?> /> <?php esc_html_e( 'Daily scan of theme/plugin PHP files for common malware signatures (flags for manual review; never auto-deletes)', 'mk-security-shield' ); ?></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Alert email', 'mk-security-shield' ); ?></th>
+						<td><input type="email" class="regular-text" name="mkss_settings[notify_email]" value="<?php echo esc_attr( $o['notify_email'] ); ?>" /></td>
+					</tr>
+				</table>
+
+				<h2><?php esc_html_e( 'Geo Restriction (Country Access Control)', 'mk-security-shield' ); ?></h2>
+				<p>
+					<?php esc_html_e( 'Restrict the entire site to visitors from specific countries. This only works if your site\'s DNS is proxied through Cloudflare (the "orange cloud" setting) — Cloudflare stamps every request with the visitor\'s country for free. This feature refuses to activate until you confirm that below.', 'mk-security-shield' ); ?>
+				</p>
+				<table class="form-table">
+					<tr>
+						<th><?php esc_html_e( 'Enable geo-restriction', 'mk-security-shield' ); ?></th>
+						<td><label><input type="checkbox" name="mkss_settings[geo_restriction_enabled]" value="1" <?php checked( $o['geo_restriction_enabled'], 1 ); ?> /></label></td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Confirm Cloudflare', 'mk-security-shield' ); ?></th>
+						<td>
+							<label>
+								<input type="checkbox" name="mkss_settings[geo_confirmed_cloudflare]" value="1" <?php checked( $o['geo_confirmed_cloudflare'], 1 ); ?> />
+								<?php esc_html_e( 'I confirm this domain\'s DNS is proxied through Cloudflare (orange-clouded). For real protection, your origin server should also be firewalled to only accept connections from Cloudflare\'s published IP ranges (cloudflare.com/ips) — otherwise an attacker who finds your real server IP can bypass this entirely.', 'mk-security-shield' ); ?>
+							</label>
+						</td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'My host restores the real visitor IP', 'mk-security-shield' ); ?></th>
+						<td>
+							<label>
+								<input type="checkbox" name="mkss_settings[geo_host_restores_real_ip]" value="1" <?php checked( $o['geo_host_restores_real_ip'], 1 ); ?> />
+								<?php esc_html_e( 'Enable ONLY if you see "geo_blocked_origin_direct" in the Activity Log for requests you know came through Cloudflare (verify your domain actually resolves to a Cloudflare IP first). Many managed hosts — Hostinger, Kinsta, WP Engine, SiteGround, and others — automatically rewrite the visitor IP back to the real one at the server level before WordPress runs, which is normally desirable but means this plugin cannot independently re-verify the request came through Cloudflare. Checking this trusts that your host only performs that rewrite for genuine Cloudflare connections.', 'mk-security-shield' ); ?>
+							</label>
+						</td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Allowed countries', 'mk-security-shield' ); ?></th>
+						<td>
+							<input type="text" class="regular-text" name="mkss_settings[geo_allowed_countries]" value="<?php echo esc_attr( $o['geo_allowed_countries'] ); ?>" />
+							<p class="description"><?php esc_html_e( 'Comma-separated 2-letter ISO country codes. Default: IN (India), NP (Nepal), LK (Sri Lanka), AE (UAE).', 'mk-security-shield' ); ?></p>
+						</td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Allow verified search engine crawlers', 'mk-security-shield' ); ?></th>
+						<td>
+							<label>
+								<input type="checkbox" name="mkss_settings[geo_allow_verified_crawlers]" value="1" <?php checked( $o['geo_allow_verified_crawlers'], 1 ); ?> />
+								<?php esc_html_e( 'Recommended — Googlebot/Bingbot/DuckDuckBot mostly crawl from outside these countries. Leaving this off will likely get your site de-indexed from search results. Verified via reverse-DNS, not just User-Agent (which is easily spoofed).', 'mk-security-shield' ); ?>
+							</label>
+						</td>
+					</tr>
+                    <tr><th><?php esc_html_e( 'Allow verified AI public browsing', 'mk-security-shield' ); ?></th>
+                    <td><label><input type="checkbox" name="mkss_settings[geo_allow_verified_ai]" value="1" <?php checked( $o['geo_allow_verified_ai'], 1 ); ?> />
+                    <?php esc_html_e( 'Allow ChatGPT-User, OAI-SearchBot, Claude-User and Claude-SearchBot on public GET/HEAD pages only after checking their source IP against official provider ranges. This does not grant login or API access.', 'mk-security-shield' ); ?></label></td></tr>
+					<tr>
+						<th><?php esc_html_e( 'Your emergency bypass link', 'mk-security-shield' ); ?></th>
+						<td>
+							<input type="text" class="large-text" readonly onclick="this.select();" value="<?php echo esc_url( add_query_arg( 'mkss_bypass', $o['geo_bypass_key'], home_url( '/' ) ) ); ?>" />
+							<p class="description"><?php esc_html_e( 'Bookmark this link before enabling the restriction. Visiting it once, from anywhere, grants your browser a 1-year bypass cookie — including for wp-login.php and wp-admin.', 'mk-security-shield' ); ?></p>
+							<input type="text" class="regular-text" name="mkss_settings[geo_bypass_key]" value="<?php echo esc_attr( $o['geo_bypass_key'] ); ?>" />
+							<label style="display:block;margin-top:6px;">
+								<input type="checkbox" name="mkss_settings[geo_bypass_key_regenerate]" value="1" />
+								<?php esc_html_e( 'Generate a new random key on save (invalidates the link above and any saved bypass cookies)', 'mk-security-shield' ); ?>
+							</label>
+						</td>
+					</tr>
+					<tr>
+						<th><?php esc_html_e( 'Message shown to blocked visitors', 'mk-security-shield' ); ?></th>
+						<td><textarea class="large-text" rows="3" name="mkss_settings[geo_block_message]"><?php echo esc_textarea( $o['geo_block_message'] ); ?></textarea></td>
+					</tr>
+				</table>
+
+				<?php submit_button(); ?>
+			</form>
+
+			<p>
+				<a href="<?php echo esc_url( admin_url( 'admin.php?page=mkss-activity-log' ) ); ?>"><?php esc_html_e( 'View Activity Log →', 'mk-security-shield' ); ?></a>
+				&nbsp;|&nbsp;
+				<a href="<?php echo esc_url( admin_url( 'admin.php?page=mkss-scan-results' ) ); ?>"><?php esc_html_e( 'View Scan Results →', 'mk-security-shield' ); ?></a>
+			</p>
+		</div>
 		<?php
-	}
-
-	/* ---------------------------------------------------------------
-	 * HELPERS
-	 * ------------------------------------------------------------- */
-
-	private function toggle_row( string $option, string $label, string $desc ): void {
-		$val = get_option( $option, ! in_array( $option, [ 'mkss_geo_restriction_enabled', 'mkss_enable_rest_api_protection' ], true ) );
-		?>
-		<tr>
-			<th><?php echo esc_html( $label ); ?></th>
-			<td>
-				<label class="mkss-toggle">
-					<input type="checkbox" name="<?php echo esc_attr( $option ); ?>" value="1" <?php checked( $val, true ); ?> />
-					<span class="mkss-toggle-slider"></span>
-				</label>
-				<p class="description"><?php echo wp_kses_post( $desc ); ?></p>
-			</td>
-		</tr>
-		<?php
-	}
-
-	private function save_button( string $section ): void {
-		?>
-		<p class="submit">
-			<button type="button" class="button button-primary mkss-save-btn" data-section="<?php echo esc_attr( $section ); ?>">
-				<?php esc_html_e( 'Save Settings', 'mk-security-shield' ); ?>
-			</button>
-			<span class="mkss-save-msg" style="display:none;margin-left:12px;color:green;font-weight:bold;"></span>
-		</p>
-		<?php
-	}
-
-	private function get_log_counts_24h(): array {
-		global $wpdb;
-		$table = $wpdb->prefix . 'mkss_activity_log';
-		$types = [ 'login_failed', 'ip_blocked', 'firewall_block', 'login_success' ];
-		$out   = array_fill_keys( $types, 0 );
-
-		$rows = $wpdb->get_results( // phpcs:ignore
-			"SELECT event_type, COUNT(*) as cnt FROM `{$table}` WHERE created_at >= NOW() - INTERVAL 1 DAY GROUP BY event_type",
-			ARRAY_A
-		);
-		foreach ( (array) $rows as $row ) {
-			if ( isset( $out[ $row['event_type'] ] ) ) {
-				$out[ $row['event_type'] ] = (int) $row['cnt'];
-			}
-		}
-		return $out;
 	}
 }

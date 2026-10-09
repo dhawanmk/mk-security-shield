@@ -1,180 +1,134 @@
 <?php
-/**
- * Login Protection for MK Security Shield v2.0.
- *
- * @package MK_Security_Shield
- */
-
-defined( 'ABSPATH' ) || exit;
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
+}
 
 class MKSS_Login_Protection {
 
-	public function __construct() {
-		add_action( 'wp_login_failed', [ $this, 'on_login_failed' ] );
-		add_filter( 'authenticate', [ $this, 'check_lockout' ], 30, 3 );
-		add_action( 'wp_login', [ $this, 'on_login_success' ], 10, 2 );
-		add_action( 'wp_logout', [ $this, 'on_logout' ] );
+	private static $instance = null;
 
-		// Hide login error messages
-		if ( get_option( 'mkss_hide_login_errors', true ) ) {
-			add_filter( 'login_errors', [ $this, 'hide_login_errors' ] );
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
 		}
-
-		// Admin-triggered unlock
-		add_action( 'admin_post_mkss_unlock_ip', [ $this, 'admin_unlock_ip' ] );
+		return self::$instance;
 	}
 
-	/**
-	 * Handle a failed login attempt.
-	 */
-	public function on_login_failed( string $username ): void {
-		$ip       = MKSS_Helper::get_ip();
-		$max      = (int) get_option( 'mkss_max_login_attempts', 5 );
-		$duration = (int) get_option( 'mkss_lockout_duration', 30 );
+	private function __construct() {
+		add_action( 'login_init', array( $this, 'block_if_locked_out' ) );
+		add_action( 'wp_login_failed', array( $this, 'record_failed_attempt' ), 10, 2 );
+		add_action( 'wp_login', array( $this, 'clear_failed_attempts' ), 10, 2 );
+		add_filter( 'authenticate', array( $this, 'verify_captcha' ), 21, 3 );
 
-		$key      = 'mkss_fails_' . md5( $ip );
-		$attempts = (int) get_transient( $key );
-		$attempts++;
-
-		if ( $attempts >= $max ) {
-			$this->lock_ip( $ip, $duration, $username );
-		} else {
-			set_transient( $key, $attempts, $duration * MINUTE_IN_SECONDS );
+		if ( MKSS_Settings::instance()->get( 'login_generic_errors' ) ) {
+			add_filter( 'login_errors', array( $this, 'generic_error_message' ) );
 		}
 
-		// Log
-		MKSS_Activity_Log::log(
-			'login_failed',
-			"Failed login for '{$username}' from {$ip} (attempt {$attempts}/{$max})",
-			1
-		);
+		if ( MKSS_Settings::instance()->get( 'login_math_captcha' ) ) {
+			add_action( 'login_form', array( $this, 'render_captcha' ) );
+		}
+	}
 
-		// Notify on repeated fails
-		if ( $attempts >= max( 3, intval( $max / 2 ) ) && get_option( 'mkss_notify_on_login_fail', true ) ) {
-			MKSS_Helper::send_alert(
-				'Repeated Login Failures',
-				"<p>Multiple failed login attempts detected.</p>
-				<ul>
-					<li><strong>Username tried:</strong> " . esc_html( $username ) . "</li>
-					<li><strong>IP Address:</strong> " . esc_html( $ip ) . "</li>
-					<li><strong>Attempt count:</strong> {$attempts}/{$max}</li>
-				</ul>"
+	private function attempts_key( $ip ) {
+		return 'mkss_attempts_' . md5( $ip );
+	}
+
+	private function lockout_key( $ip ) {
+		return 'mkss_lockout_' . md5( $ip );
+	}
+
+	public function block_if_locked_out() {
+		$ip           = MKSS_Helper::get_client_ip();
+		$locked_until = get_transient( $this->lockout_key( $ip ) );
+
+		if ( $locked_until && $locked_until > time() ) {
+			MKSS_Activity_Log::log( 'login_blocked', 'Login attempt while IP is locked out' );
+			wp_die(
+				esc_html__( 'Too many failed login attempts. Please try again later.', 'mk-security-shield' ),
+				esc_html__( 'Access temporarily blocked', 'mk-security-shield' ),
+				array( 'response' => 429 )
 			);
 		}
 	}
 
-	/**
-	 * Block login if IP is locked out.
-	 */
-	public function check_lockout( $user, string $username, string $password ) {
-		$ip = MKSS_Helper::get_ip();
+	public function record_failed_attempt( $username, $error = null ) {
+		$ip       = MKSS_Helper::get_client_ip();
+		$settings = MKSS_Settings::instance();
+		$key      = $this->attempts_key( $ip );
+		$count    = (int) get_transient( $key ) + 1;
 
-		global $wpdb;
-		$table = $wpdb->prefix . 'mkss_ip_blocks';
-		$row   = $wpdb->get_row( $wpdb->prepare(
-			"SELECT * FROM `{$table}` WHERE ip_address = %s AND blocked_until > UTC_TIMESTAMP()",
-			$ip
-		) );
+		set_transient( $key, $count, HOUR_IN_SECONDS );
 
-		if ( $row ) {
-			$remaining = human_time_diff( time(), strtotime( $row->blocked_until ) );
-			return new WP_Error(
-				'mkss_lockout',
-				sprintf(
-					/* translators: %s: time remaining */
-					__( 'Too many failed login attempts. Try again in %s.', 'mk-security-shield' ),
-					$remaining
-				)
-			);
+		MKSS_Activity_Log::log( 'login_failed', "Failed login attempt ({$count})", $username );
+
+		if ( $count >= (int) $settings->get( 'login_max_attempts' ) ) {
+			$minutes = (int) $settings->get( 'login_lockout_minutes' );
+			set_transient( $this->lockout_key( $ip ), time() + ( $minutes * MINUTE_IN_SECONDS ), $minutes * MINUTE_IN_SECONDS );
+			MKSS_Activity_Log::log( 'ip_locked', "IP locked out for {$minutes} minutes", $username );
+		}
+	}
+
+	public function clear_failed_attempts( $user_login, $user = null ) {
+		$ip = MKSS_Helper::get_client_ip();
+		delete_transient( $this->attempts_key( $ip ) );
+		delete_transient( $this->lockout_key( $ip ) );
+		MKSS_Activity_Log::log( 'login_success', 'Successful login', $user_login );
+	}
+
+	public function generic_error_message( $error ) {
+		return esc_html__( 'Invalid credentials.', 'mk-security-shield' );
+	}
+
+	public function render_captcha() {
+		$a       = wp_rand( 1, 10 );
+		$b       = wp_rand( 1, 10 );
+		$expires = time() + ( 15 * MINUTE_IN_SECONDS );
+		$token   = wp_hash( $a . '|' . $b . '|' . $expires . '|mkss_captcha' );
+		?>
+		<p class="mkss-captcha-field">
+			<label for="mkss_captcha_answer"><?php printf( esc_html__( 'Security check: what is %1$d + %2$d?', 'mk-security-shield' ), (int) $a, (int) $b ); ?></label>
+			<input type="text" name="mkss_captcha_answer" id="mkss_captcha_answer" class="input" autocomplete="off" />
+			<input type="hidden" name="mkss_captcha_a" value="<?php echo esc_attr( $a ); ?>" />
+			<input type="hidden" name="mkss_captcha_b" value="<?php echo esc_attr( $b ); ?>" />
+			<input type="hidden" name="mkss_captcha_expires" value="<?php echo esc_attr( $expires ); ?>" />
+			<input type="hidden" name="mkss_captcha_token" value="<?php echo esc_attr( $token ); ?>" />
+		</p>
+		<?php
+	}
+
+	public function verify_captcha( $user, $username, $password ) {
+		// Only enforce on an actual wp-login.php form submission (login_init
+		// already fired earlier in this same request). This avoids blocking
+		// programmatic authenticate() calls such as REST API Application
+		// Passwords, which have no captcha fields to check.
+		if ( ! did_action( 'login_init' ) ) {
+			return $user;
+		}
+
+		if ( ! MKSS_Settings::instance()->get( 'login_math_captcha' ) ) {
+			return $user;
+		}
+
+		if ( empty( $username ) && empty( $password ) ) {
+			return $user;
+		}
+
+		$a       = isset( $_POST['mkss_captcha_a'] ) ? (int) $_POST['mkss_captcha_a'] : null;
+		$b       = isset( $_POST['mkss_captcha_b'] ) ? (int) $_POST['mkss_captcha_b'] : null;
+		$expires = isset( $_POST['mkss_captcha_expires'] ) ? (int) $_POST['mkss_captcha_expires'] : 0;
+		$token   = isset( $_POST['mkss_captcha_token'] ) ? sanitize_text_field( wp_unslash( $_POST['mkss_captcha_token'] ) ) : '';
+		$answer  = isset( $_POST['mkss_captcha_answer'] ) ? (int) $_POST['mkss_captcha_answer'] : null;
+
+		if ( null === $a || null === $b || ! $token || $expires < time() ) {
+			return new WP_Error( 'mkss_captcha_expired', __( '<strong>Error:</strong> Security check expired, please try again.', 'mk-security-shield' ) );
+		}
+
+		$expected_token = wp_hash( $a . '|' . $b . '|' . $expires . '|mkss_captcha' );
+
+		if ( ! hash_equals( $expected_token, $token ) || ( $a + $b ) !== $answer ) {
+			return new WP_Error( 'mkss_captcha_failed', __( '<strong>Error:</strong> Incorrect answer to the security check.', 'mk-security-shield' ) );
 		}
 
 		return $user;
-	}
-
-	/**
-	 * Log successful login.
-	 */
-	public function on_login_success( string $username, WP_User $user ): void {
-		$ip = MKSS_Helper::get_ip();
-
-		// Clear fail counter for this IP
-		delete_transient( 'mkss_fails_' . md5( $ip ) );
-
-		MKSS_Activity_Log::log(
-			'login_success',
-			"Successful login: '{$username}' from {$ip}",
-			0
-		);
-	}
-
-	/**
-	 * Log logout event.
-	 */
-	public function on_logout(): void {
-		$user = wp_get_current_user();
-		if ( $user->exists() ) {
-			MKSS_Activity_Log::log( 'logout', "User '{$user->user_login}' logged out from " . MKSS_Helper::get_ip(), 0 );
-		}
-	}
-
-	/**
-	 * Replace login error messages with a generic one.
-	 */
-	public function hide_login_errors( string $error ): string {
-		return __( 'Incorrect login details.', 'mk-security-shield' );
-	}
-
-	/**
-	 * Lock an IP address for a given number of minutes.
-	 */
-	private function lock_ip( string $ip, int $minutes, string $username ): void {
-		global $wpdb;
-		$table        = $wpdb->prefix . 'mkss_ip_blocks';
-		$blocked_until = gmdate( 'Y-m-d H:i:s', time() + $minutes * MINUTE_IN_SECONDS );
-
-		$wpdb->replace( $table, [
-			'ip_address'    => $ip,
-			'reason'        => "Too many failed logins for '{$username}'",
-			'blocked_until' => $blocked_until,
-			'attempts'      => (int) get_option( 'mkss_max_login_attempts', 5 ),
-		], [ '%s', '%s', '%s', '%d' ] );
-
-		MKSS_Activity_Log::log(
-			'ip_blocked',
-			"IP {$ip} blocked for {$minutes} minutes after repeated login failures for '{$username}'",
-			2
-		);
-
-		MKSS_Helper::send_alert(
-			'IP Address Blocked',
-			"<p>An IP has been blocked after too many failed login attempts.</p>
-			<ul>
-				<li><strong>IP:</strong> " . esc_html( $ip ) . "</li>
-				<li><strong>Username:</strong> " . esc_html( $username ) . "</li>
-				<li><strong>Blocked until:</strong> " . esc_html( $blocked_until ) . "</li>
-			</ul>
-			<p><a href='" . esc_url( admin_url( 'admin.php?page=mk-security-shield&tab=activity' ) ) . "'>View Activity Log</a></p>"
-		);
-		MKSS_Helper::send_slack( "🚫 IP {$ip} blocked for {$minutes} min after failed logins for '{$username}'" );
-	}
-
-	/**
-	 * Admin action to manually unlock an IP.
-	 */
-	public function admin_unlock_ip(): void {
-		if ( ! current_user_can( 'manage_options' ) || ! isset( $_GET['ip'] ) ) {
-			wp_die( 'Unauthorized' );
-		}
-		check_admin_referer( 'mkss_unlock_ip' );
-
-		$ip = sanitize_text_field( wp_unslash( $_GET['ip'] ) );
-		global $wpdb;
-		$wpdb->delete( $wpdb->prefix . 'mkss_ip_blocks', [ 'ip_address' => $ip ] );
-		delete_transient( 'mkss_fails_' . md5( $ip ) );
-
-		MKSS_Activity_Log::log( 'ip_unblocked', "Admin manually unblocked IP: {$ip}", 0 );
-
-		wp_safe_redirect( admin_url( 'admin.php?page=mk-security-shield&tab=activity&mkss_msg=ip_unlocked' ) );
-		exit;
 	}
 }

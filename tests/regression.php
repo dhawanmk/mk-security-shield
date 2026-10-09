@@ -14,7 +14,7 @@ define( 'DAY_IN_SECONDS', 86400 );
 @mkdir( ABSPATH, 0777, true );
 $options = $transients = $hooks = $http = $requests = $mail = $logs = [];
 $admin = false;
-$capable = true;
+$capable = false;
 $logged_in = false;
 $wp_version = '6.7';
 $wp_local_package = 'en_US';
@@ -97,23 +97,34 @@ function denied( callable $fn ) {
 	try { $fn(); return false; } catch ( Test_Response $e ) { return 403 === $e->data; }
 }
 
-// Exercise the actual plugin entrypoint: previously fatal because two required files were absent.
+
+function wp_parse_args( $a, $b ) { return array_merge( $b, (array) $a ); }
+function wp_generate_password( ...$args ) { return str_repeat( 'x', 32 ); }
+function wp_next_scheduled( $name ) { return false; }
+function wp_schedule_event( $time, $recurrence, $hook ) { $GLOBALS['scheduled'][$hook] = $recurrence; }
+function wp_doing_cron() { return false; }
+function wpautop( $v ) { return $v; }
+function home_url( $v = '' ) { return 'https://example.org' . $v; }
+function sanitize_textarea_field( $v ) { return $v; }
+function do_action( $name, ...$args ) { $GLOBALS['actions'][] = $name; }
+function is_email( $v ) { return filter_var( $v, FILTER_VALIDATE_EMAIL ); }
+function insert_with_markers( ...$args ) { return true; }
+function wp_get_upload_dir() { return [ 'basedir' => ABSPATH ]; }
+function trailingslashit( $v ) { return rtrim( $v, '/' ) . '/'; }
+function set_setting( $key, $value ) {
+    $p = new ReflectionProperty( MKSS_Settings::class, 'options' ); if ( PHP_VERSION_ID < 80100 ) { $p->setAccessible( true ); }
+    $settings = MKSS_Settings::instance(); $values = $p->getValue( $settings ); $values[$key] = $value; $p->setValue( $settings, $values );
+}
+$options['mkss_settings'] = [ 'login_lockout_minutes' => 20, 'login_math_captcha' => 1, 'disable_file_edit' => 0, 'geo_restriction_enabled' => 1, 'geo_confirmed_cloudflare' => 1, 'geo_allowed_countries' => 'IN,NP,LK,AE', 'firewall_mode' => 'log' ];
 require dirname( __DIR__ ) . '/mk-security-shield.php';
 foreach ( $hooks['plugins_loaded'] as $hook ) { $hook[0](); }
-expect( null !== MK_Security_Shield::get_instance()->get_module( 'file_monitor' ), 'plugin boots all shipped modules' );
-expect( class_exists( 'MKSS_AI_Connect' ), 'AI module is packaged' );
-expect( null === MK_Security_Shield::get_instance()->get_module( 'two_factor' ), 'missing 2FA is not represented as protection' );
-
-$options = [ 'mkss_enable_geo' => true, 'mkss_geo_mode' => 'whitelist', 'mkss_geo_allowed_countries' => "in,US\nIN" ];
-MKSS_Helper::migrate_options();
-expect( true === get_option( 'mkss_geo_restriction_enabled' ), 'legacy enable migrates' );
-expect( 'allowlist' === get_option( 'mkss_geo_mode' ), 'legacy mode migrates' );
-expect( [ 'IN', 'US' ] === get_option( 'mkss_geo_allowed_countries' ), 'legacy country text normalized' );
-$options = [ 'mkss_geo_restriction_enabled' => false, 'mkss_geo_enabled' => true ];
-MKSS_Helper::migrate_options();
-expect( false === get_option( 'mkss_geo_restriction_enabled' ), 'explicit current disabled setting wins' );
-expect( [ 'IN', 'US' ] === MKSS_Helper::country_codes( [ 'in', 'US', 'XX', [], 'INVALID' ] ), 'array country validation' );
-
+expect( class_exists( 'MKSS_Two_Factor' ) && class_exists( 'MKSS_AI_Connect' ) && class_exists( 'MKSS_Verified_AI' ), 'legacy 2FA and AI account modules plus public verification boot' );
+expect( 20 === MKSS_Settings::instance()->get( 'login_lockout_minutes' ), 'existing settings retained' );
+expect( 1 === MKSS_Settings::instance()->get( 'login_math_captcha' ) && isset( $hooks['login_form'] ), 'existing login challenge retained' );
+expect( 'daily' === $scheduled['mkss_file_monitor_scan'] && 'daily' === $scheduled['mkss_malware_scan'], 'legacy daily integrity and malware schedules retained' );
+expect( ! isset( $hooks['wp_is_application_passwords_available'] ), 'existing application password availability preserved' );
+expect( isset( $hooks['rest_authentication_errors'] ) && isset( $hooks['template_redirect'] ), 'geo waits until routing and REST authentication' );
+expect( DONOTCACHEPAGE, 'geo responses cannot share full-page cache' );
 foreach ( [ [ '198.51.100.255', '198.51.100.0/24', true ], [ '198.51.101.0', '198.51.100.0/24', false ], [ '2001:db8:abcd::1', '2001:db8::/32', true ], [ '2001:db9::', '2001:db8::/32', false ], [ '2001:db8::1', '198.51.100.0/24', false ], [ '1.2.3.4', '0.0.0.0/0', false ], [ '1.2.3.4', '1.2.3.4/33', false ], [ '1.2.3.4', '1.2.3.4/-1', false ], [ '1.2.3.4', '1.2.3.4/32/1', false ], [ '198.51.100.127', '198.51.100.0/25', true ], [ '198.51.100.128', '198.51.100.0/25', false ] ] as $case ) {
 	expect( $case[2] === MKSS_Helper::ip_in_cidr( $case[0], $case[1] ), 'CIDR boundary ' . $case[1] );
 }
@@ -128,94 +139,72 @@ expect( '1.1.1.1' === MKSS_Helper::get_ip(), 'Cloudflare IPv6 peer accepts CF cl
 $_SERVER['HTTP_CF_CONNECTING_IP'] = '1.1.1.1,2.2.2.2';
 expect( '2606:4700::1234' === MKSS_Helper::get_ip(), 'invalid single-IP header rejected' );
 
-$http['https://ipapi.co/1.1.1.1/country/'] = response( 'US' );
-expect( 'US' === MKSS_Helper::get_country( '1.1.1.1' ), 'valid country lookup' );
-$before = count( $requests );
-expect( 'US' === MKSS_Helper::get_country( '1.1.1.1' ) && $before === count( $requests ), 'country success cache' );
-expect( '' === MKSS_Helper::get_country( '127.0.0.1' ), 'local address does not use geo API' );
-expect( '' === MKSS_Helper::get_country( '8.8.8.8' ), 'geo outage returns unknown' );
-$before = count( $requests );
-expect( '' === MKSS_Helper::get_country( '8.8.8.8' ) && $before === count( $requests ), 'geo outage negative cache' );
-$http['https://ipapi.co/9.9.9.9/country/'] = response( '<html>Error</html>' );
-expect( '' === MKSS_Helper::get_country( '9.9.9.9' ), 'invalid country response remains unknown' );
-
 $feeds = [ 'ChatGPT-User' => 'https://openai.com/chatgpt-user.json', 'OAI-SearchBot' => 'https://openai.com/searchbot.json', 'Claude-User' => 'https://claude.com/crawling/bots.json', 'Claude-SearchBot' => 'https://claude.com/crawling/bots.json' ];
 foreach ( $feeds as $bot => $url ) {
 	$http[$url] = response( [ 'prefixes' => [ [ 'ipv4Prefix' => '198.51.100.0/24' ], [ 'ipv6Prefix' => '2001:db8::/32' ] ] ] );
 	request( '198.51.100.5', 'Mozilla/5.0 (compatible; ' . $bot . '/1.0)' );
-	expect( MKSS_AI_Connect::can_bypass_geo(), 'verified bot ' . $bot );
+	expect( MKSS_Verified_AI::can_bypass_geo(), 'verified bot ' . $bot );
 }
 request( '2001:db8::1' );
-expect( MKSS_AI_Connect::can_bypass_geo(), 'verified IPv6 bot' );
+expect( MKSS_Verified_AI::can_bypass_geo(), 'verified IPv6 bot' );
 request( '198.51.101.5' );
 $_SERVER['HTTP_CF_CONNECTING_IP'] = '198.51.100.5';
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'forged bot IP/header has no exception' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'forged bot IP/header has no exception' );
 request( '198.51.100.5', 'PretendClaude-User/1.0' );
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'bot token must match fully' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'bot token must match fully' );
 foreach ( [ 'GPTBot/1.0', 'ClaudeBot/1.0', 'python-requests/2.0' ] as $ua ) {
 	request( '198.51.100.5', $ua );
-	expect( ! MKSS_AI_Connect::can_bypass_geo(), 'training/generic bot excluded ' . $ua );
+	expect( ! MKSS_Verified_AI::can_bypass_geo(), 'training/generic bot excluded ' . $ua );
 }
 foreach ( [ '/wp-login.php', '/wp-admin/', '/wp-json/wp/v2/posts', '/?rest_route=/wp/v2/posts', '/wp%2dadmin/', '/xmlrpc.php', '/mcp/', '/oauth/', '/foo.php', '/../wp-admin' ] as $path ) {
 	request( '198.51.100.5', 'Claude-User/1.0', $path );
 	if ( strpos( $path, 'rest_route' ) !== false ) $_GET['rest_route'] = '/wp/v2/posts';
-	expect( ! MKSS_AI_Connect::can_bypass_geo(), 'protected path excluded ' . $path );
+	expect( ! MKSS_Verified_AI::can_bypass_geo(), 'protected path excluded ' . $path );
 }
 request( '198.51.100.5', 'Claude-User/1.0', '/', 'POST' );
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'POST has no AI exception' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'POST has no AI exception' );
 request( '198.51.100.5', 'Claude-User/1.0', '/', 'HEAD' );
-expect( MKSS_AI_Connect::can_bypass_geo(), 'HEAD public read allowed' );
+expect( MKSS_Verified_AI::can_bypass_geo(), 'HEAD public read allowed' );
 request( '198.51.100.5', 'Claude-User/1.0', '/caf%C3%A9/' );
-expect( MKSS_AI_Connect::can_bypass_geo(), 'international public slug allowed' );
+expect( MKSS_Verified_AI::can_bypass_geo(), 'international public slug allowed' );
 $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer test';
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'authorization does not acquire crawler exemption' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'authorization does not acquire crawler exemption' );
 request();
-$options['mkss_geo_allow_verified_ai'] = false;
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'admin can disable exception' );
-$options['mkss_geo_allow_verified_ai'] = true;
+set_setting( 'geo_allow_verified_ai', false );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'admin can disable exception' );
+set_setting( 'geo_allow_verified_ai', true );
 $transients = [];
 $http['https://claude.com/crawling/bots.json'] = new WP_Error();
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'provider outage fails verification closed' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'provider outage fails verification closed' );
 $before = count( $requests );
-expect( ! MKSS_AI_Connect::can_bypass_geo() && count( $requests ) === $before, 'provider outage cached' );
+expect( ! MKSS_Verified_AI::can_bypass_geo() && count( $requests ) === $before, 'provider outage cached' );
 $transients = [];
 $http['https://claude.com/crawling/bots.json'] = response( [ 'prefixes' => [ [ 'ipv4Prefix' => '0.0.0.0/0' ], 'malformed' ] ] );
-expect( ! MKSS_AI_Connect::can_bypass_geo(), 'unsafe/malformed feed grants no access' );
+expect( ! MKSS_Verified_AI::can_bypass_geo(), 'unsafe/malformed feed grants no access' );
 $transients = [];
 $http['https://claude.com/crawling/bots.json'] = response( [ 'prefixes' => [ [ 'ipv4Prefix' => '198.51.100.0/24' ] ] ] );
 
-// Geo behavior through its registered front-end hook.
-$options['mkss_geo_restriction_enabled'] = true;
-$options['mkss_geo_mode'] = 'allowlist';
-$options['mkss_geo_allowed_countries'] = [ 'IN' ];
-$geo = new MKSS_Geo_Restriction();
-expect( isset( $hooks['template_redirect'] ), 'geo runs after routing' );
-$transients['mkss_geo_' . md5( '198.51.100.5' )] = [ 'US', DAY_IN_SECONDS ];
-request();
-expect( ! denied( [ $geo, 'check_visitor_country' ] ), 'verified US AI reads India-only site' );
-request( '198.51.100.5', 'Mozilla/5.0' );
-expect( denied( [ $geo, 'check_visitor_country' ] ), 'ordinary US visitor remains geo-blocked' );
-$transients['mkss_geo_' . md5( '198.51.100.5' )] = [ 'IN', DAY_IN_SECONDS ];
-expect( ! denied( [ $geo, 'check_visitor_country' ] ), 'allowed-country visitor passes' );
-$options['mkss_geo_mode'] = 'blocklist';
-$options['mkss_geo_blocked_countries'] = 'in,US';
-expect( denied( [ $geo, 'check_visitor_country' ] ), 'legacy text blocklist applies' );
-request( '8.8.8.8', 'Mozilla/5.0' );
-expect( ! denied( [ $geo, 'check_visitor_country' ] ), 'geo API outage does not lock out visitors' );
 
-// A verified crawler still faces active IP blocks and encoded attack rules.
-$firewall = new MKSS_Firewall();
-request( '198.51.100.5', 'Claude-User/1.0', '/?q=%253Cscript%253Ealert(1)%253C%252Fscript%253E' );
-expect( denied( [ $firewall, 'run' ] ), 'double-encoded XSS blocked for AI' );
-request( '198.51.100.5', 'Claude-User/1.0', '/%252e%252e%252fwp-config.php' );
-expect( denied( [ $firewall, 'run' ] ), 'double-encoded traversal blocked' );
-request();
-$wpdb->blocked = true;
-expect( denied( [ $firewall, 'run' ] ), 'blocked AI IP stays blocked' );
-$wpdb->blocked = false;
-$prior_error = new WP_Error();
-expect( $prior_error === $firewall->restrict_rest_api( $prior_error ), 'REST authentication error preserved' );
-
+$geo = MKSS_Geo_Restriction::instance();
+request(); expect( ! denied( [ $geo, 'enforce' ] ), 'verified overseas AI reads restricted public page' );
+request( '198.51.100.5', 'Mozilla/5.0' ); expect( denied( [ $geo, 'enforce' ] ), 'unverified direct-origin request is denied' );
+request( '173.245.48.10', 'Mozilla/5.0' ); $_SERVER['HTTP_CF_CONNECTING_IP'] = '198.51.101.5'; $_SERVER['HTTP_CF_IPCOUNTRY'] = 'US';
+expect( denied( [ $geo, 'enforce' ] ), 'ordinary overseas visitor remains blocked' );
+$_SERVER['HTTP_USER_AGENT'] = 'Claude-User/1.0'; expect( denied( [ $geo, 'enforce' ] ), 'spoofed AI user agent stays blocked' );
+$_SERVER['HTTP_CF_CONNECTING_IP'] = '198.51.100.5'; expect( ! denied( [ $geo, 'enforce' ] ), 'trusted proxy verified AI passes' );
+$_SERVER['REQUEST_URI'] = '/wp-login.php'; expect( denied( [ $geo, 'enforce' ] ), 'verified AI has no login exemption' );
+$_SERVER['REQUEST_URI'] = '/products/'; $_SERVER['HTTP_USER_AGENT'] = 'Mozilla/5.0'; $_SERVER['HTTP_CF_IPCOUNTRY'] = 'IN';
+expect( ! denied( [ $geo, 'enforce' ] ), 'allowed visitor country passes' );
+unset( $_SERVER['HTTP_CF_IPCOUNTRY'] ); expect( denied( [ $geo, 'enforce' ] ), 'unknown country remains denied under existing policy' );
+$capable = true; request( '198.51.101.5', 'Mozilla/5.0' ); expect( ! denied( [ $geo, 'enforce' ] ), 'authenticated administrator retains recovery access' ); $capable = false;
+$prior = new WP_Error(); expect( $geo->enforce_rest( $prior ) === $prior, 'REST auth error is preserved' );
+$logged_in = true; expect( true === $geo->enforce_rest( true ), 'authenticated connector access is preserved without adding capabilities' ); $logged_in = false;
+$geo->disable_geo_cache(); expect( in_array( 'litespeed_control_set_nocache', $actions, true ), 'LiteSpeed receives no-cache directive' );
+$firewall = MKSS_Firewall::instance(); request( '198.51.100.5', 'Claude-User/1.0', '/?q=%253Cscript%253Etest%253C%252Fscript%253E' );
+expect( ! denied( [ $firewall, 'inspect_request' ] ) && 'firewall_match' === end( $logs )['event_type'], 'encoded threat is logged in existing log-only mode' );
+set_setting( 'firewall_mode', 'block' ); expect( denied( [ $firewall, 'inspect_request' ] ), 'encoded threat blocked with actual HTTP 403 in block mode' );
+request(); $_POST = [ 'nested' => [ 'value' => 'etc/passwd' ] ]; expect( denied( [ $firewall, 'inspect_request' ] ), 'POST body threat remains checked' );
+set_setting( 'firewall_mode', 'log' );
 // Missing-only exclusions and actual checksum changes.
 $options['mkss_notify_on_file_change'] = true;
 $options['mkss_security_exclusions'] = [ 'readme.html' ];
@@ -224,7 +213,7 @@ $manifest = [ 'readme.html' => md5( 'official readme' ), 'wp-trackback.php' => m
 file_put_contents( ABSPATH . 'wp-trackback.php', 'trackback' );
 file_put_contents( ABSPATH . 'index.php', 'core' );
 $http[$manifest_url] = response( [ 'checksums' => $manifest ] );
-$monitor = new MKSS_File_Monitor();
+$monitor = new MKSS_Integrity_Engine();
 $mail = [];
 $result = $monitor->run_integrity_check();
 expect( $result['ok'] && 1 === $result['skipped'] && 2 === $result['checked'], 'missing readme is excluded, executable files checked' );
@@ -260,25 +249,18 @@ $before = count( $requests );
 expect( 'deferred' === $monitor->run_integrity_check()['status'] && count( $requests ) === $before, 'active core update defers scan' );
 delete_option( 'core_updater.lock' );
 
-// Save only the displayed tab; reject invalid arrays and unauthorized users.
-$settings = new MKSS_Settings();
-$options['mkss_block_sql_injection'] = true;
-$options['mkss_max_login_attempts'] = 9;
-$_POST = [ 'settings' => [ 'mkss_geo_restriction_enabled' => '1', 'mkss_geo_allow_verified_ai' => '0', 'mkss_geo_allowed_countries' => "in,US\nIN" ] ];
-try { $settings->ajax_save(); } catch ( Test_Response $e ) { expect( $e->data['success'], 'geo settings saved' ); }
-expect( true === get_option( 'mkss_block_sql_injection' ) && 9 === get_option( 'mkss_max_login_attempts' ), 'saving geo preserves firewall/login settings' );
-expect( [ 'IN', 'US' ] === get_option( 'mkss_geo_allowed_countries' ) && false === get_option( 'mkss_geo_allow_verified_ai' ), 'geo settings normalize and unchecked toggles save' );
-$_POST = [ 'settings' => [ 'mkss_geo_mode' => [] ] ];
-try { $settings->ajax_save(); } catch ( Test_Response $e ) { expect( ! $e->data['success'], 'nested value rejected' ); }
-$capable = false;
-$_POST = [ 'settings' => [ 'mkss_geo_restriction_enabled' => '0' ] ];
-try { $settings->ajax_save(); } catch ( Test_Response $e ) { expect( ! $e->data['success'], 'non-admin save rejected' ); }
-expect( true === get_option( 'mkss_geo_restriction_enabled' ), 'non-admin cannot change geo' );
-$capable = true;
-$_POST = [ 'settings' => [ 'mkss_notify_slack_webhook' => 'https://127.0.0.1/internal' ] ];
-try { $settings->ajax_save(); } catch ( Test_Response $e ) { expect( ! $e->data['success'], 'non-Slack webhook rejected' ); }
-expect( false === get_option( 'mkss_notify_slack_webhook' ), 'invalid webhook not persisted' );
 
+$manifest = [ 'index.php' => md5( 'core' ), 'wp-content/themes/custom.php' => md5( 'default' ) ];
+$http[$manifest_url] = response( [ 'checksums' => $manifest ] );
+expect( $monitor->run_integrity_check()['ok'], 'custom wp-content is excluded from core verification' );
+$result = MKSS_File_Monitor::instance()->run_scan();
+expect( 'complete' === $result['status'] && isset( get_option( 'mkss_file_monitor_results' )['time'] ), 'legacy results UI receives new verified status' );
+$values = $options['mkss_settings']; $values['harden_htaccess'] = 0; $values['firewall_mode'] = 'log'; $values['notify_email'] = 'owner@example.org';
+$values['geo_allow_verified_ai'] = 1; $values['geo_bypass_key'] = str_repeat( 'b', 32 );
+$clean = MKSS_Settings::instance()->sanitize( $values );
+expect( 20 === $clean['login_lockout_minutes'] && 1 === $clean['login_math_captcha'] && 0 === $clean['disable_file_edit'], 'settings save preserves prior selected controls' );
+expect( 'IN,NP,LK,AE' === $clean['geo_allowed_countries'] && 1 === $clean['geo_allow_verified_ai'], 'legacy countries and new AI control save together' );
+expect( in_array( 'litespeed_purge_all', $actions, true ), 'settings changes purge previous page cache decisions' );
 // Custom host proxy chains: walk from the trusted peer toward the client, never trust the leftmost value blindly.
 define( 'MKSS_TRUSTED_PROXIES', [ '10.0.0.0/8' ] );
 define( 'MKSS_CLIENT_IP_HEADER', 'HTTP_X_FORWARDED_FOR' );

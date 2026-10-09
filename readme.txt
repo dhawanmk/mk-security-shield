@@ -1,91 +1,147 @@
 === MK Security Shield ===
 Contributors: mkdhawan
-Tags: security, firewall, login protection, integrity, geo blocking
+Tags: security, firewall, login security, two-factor, hardening
 Requires at least: 5.8
-Stable tag: 2.1.0
+Tested up to: 6.6
 Requires PHP: 8.0
+Stable tag: 2.1.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-WordPress login protection, URL firewall, core integrity monitoring, code pattern review, and country restrictions with verified public AI browsing.
+Hardens WordPress against common attack vectors: brute-force logins, XML-RPC abuse, user enumeration, malicious requests, and file tampering.
 
 == Description ==
 
-* Login attempt limits with expiring IP lockouts and activity logging.
-* URL/query rules for common SQL injection, XSS and traversal patterns. These rules supplement normal application validation and server/CDN protection.
-* Core integrity comparisons against official WordPress checksums. Missing optional documentation is ignored; present files are still verified.
-* Country blocklist/allowlist using ipapi.co. Unknown countries are allowed when lookup fails.
-* Verified Claude and ChatGPT user/search bots can read public pages despite country restrictions. Verification requires the official source IP and recognized user-agent; IP blocks and WAF checks still apply.
-* Configurable email and HTTPS Slack incoming-webhook alerts.
-* File-editor disabling, version hiding, security response headers and a WordPress dashboard widget.
-* Heuristic PHP pattern scanning for manual review. Pattern matches are not confirmed infections; a no-match result does not prove the site is malware-free.
+MK Security Shield is a self-contained WordPress hardening plugin. Security checks run on your server. Core integrity checks contact WordPress.org; verified AI browsing optionally fetches official provider IP ranges over HTTPS and caches them locally. These requests do not send visitor content or credentials.
 
-The original source repository referenced a two-factor module that it did not include. This release does not implement 2FA. It avoids the missing-file fatal error and displays an administrator warning when 2FA is configured without a module. Use a maintained independent 2FA solution.
+**No plugin can honestly promise protection against "all" hacking threats.** Attackers exploit weak or reused passwords, outdated plugins and themes, vulnerable hosting configurations, and social engineering — none of which any WordPress plugin can fully control. This plugin closes off the most common WordPress-specific attack surfaces and gives you visibility into suspicious activity. Treat it as one layer in a broader practice that also includes:
+
+* Keeping WordPress core, your theme, and all plugins updated
+* Using strong, unique passwords (a password manager helps)
+* Taking regular off-site backups
+* Using a reputable host with a server-level firewall
+
+= Features =
+
+**Login security**
+* Login attempt rate limiting with a configurable lockout duration, keyed by IP address
+* Generic login error messages (prevents "wrong username" vs "wrong password" enumeration)
+* Simple math challenge on the login form to slow down basic bots
+* Optional per-user Two-Factor Authentication (TOTP, compatible with Google Authenticator / Authy / 1Password — no external service required)
+
+**Hardening**
+* Disables XML-RPC (a common brute-force and DDoS amplification target)
+* Disables the theme/plugin file editor
+* Hides the WordPress version number from public output
+* Blocks `?author=N` username enumeration and restricts the REST API users endpoint for logged-out visitors
+* Adds recommended security response headers (X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy, HSTS on HTTPS sites, optional Content-Security-Policy)
+* Hardens `.htaccess` on Apache hosts: blocks direct access to `wp-config.php` and log/backup files, disables directory listing, and blocks PHP execution inside the uploads folder
+
+**Firewall (beta)**
+* Lightweight request filter that flags common SQL injection, path traversal, and code-injection patterns in the request URI, query string, and POST body — starts in log-only mode so you can review before enforcing blocks
+
+**Monitoring**
+* Daily WordPress core file integrity check against the official WordPress.org checksums, with email alerts on modified or missing files
+* Daily scan of theme/plugin PHP files for common malware signatures, flagged for manual review (never auto-deletes files)
+* Full activity log of failed logins, lockouts, firewall matches, and scan results, viewable from the dashboard
+
+**Geo Restriction (optional, off by default)**
+* Restricts the whole site — including wp-login.php and wp-admin — to visitors from a chosen list of countries (defaults to India, Nepal, Sri Lanka, UAE)
+* Requires the site to be proxied through Cloudflare (free plan is enough); the plugin refuses to activate this feature until you explicitly confirm that, so it never silently trusts a header nobody is actually setting
+* Verifies the connecting request actually came from a genuine Cloudflare edge IP before trusting anything it says, closing the common "attacker finds the origin server IP and bypasses the CDN entirely" hole (you should still firewall your origin server to Cloudflare's IP ranges for the durable fix — see FAQ)
+* Optionally allowlists Googlebot/Bingbot/DuckDuckBot via verified reverse-DNS (not just User-Agent, which is trivially spoofable) so you don't accidentally get de-indexed from search results
+* Ships with a personal emergency bypass link (a secret URL you visit once to grant your own browser a 1-year bypass cookie) so you're never locked out of your own site while traveling
+
+**Connect AI Assistant (optional, off by default)**
+* An explicit, Jetpack-style consent screen for letting an AI assistant (Claude, via an MCP client) manage this site — not a hidden or automatic connection, and not a hardcoded credential shipped in code
+* Access is issued to a dedicated, purpose-created WordPress account — never your own admin login — so AI-driven changes are attributable in revision history and separate from your own edits
+* You choose the access level (Content Editor / Content + Design / Full Control) before anything is created; Full Control requires an extra explicit confirmation
+* Uses WordPress core's own built-in Application Passwords (5.6+) for the actual credential — shown once, revocable with one click, never stored in plaintext by this plugin
+* The service account is blocked from ever logging in interactively via wp-login.php — enforced at two independent layers, so it can only ever be used through its Application Password
+* Every connect, revoke, and authenticated use is written to the Activity Log
+* Does not bundle an MCP server — that's WordPress core's own official `WordPress/mcp-adapter` plugin's job (linked from the connection screen); this module only handles authorization and audit, which is what a security plugin should own
+
+= What this plugin does NOT do =
+
+* It is not a cloud WAF and does not maintain a live-updated threat signature database
+* It cannot patch vulnerabilities in your theme or other plugins — keep everything updated
+* The malware scanner flags *patterns*, not confirmed infections — always review matches manually before deleting anything
+* The bundled math challenge is a basic bot deterrent, not a substitute for a real CAPTCHA or for Two-Factor Authentication
+* IP-based lockouts trust `REMOTE_ADDR` by default; only enable `MKSS_TRUST_PROXY_HEADERS` if you are certain your site sits behind a trusted reverse proxy/CDN
 
 == Installation ==
 
-1. Back up the database and current plugin folder. Read UPGRADE.md, especially the 2FA and proxy notes.
-2. Test the ZIP on a staging copy before replacing a live installation.
-3. Upload the mk-security-shield folder to wp-content/plugins, or use WordPress's plugin ZIP replacement flow.
-4. Open MK Security and review each settings tab.
-5. In Geo Restriction, confirm mode/countries and Allow Verified AI Browsing. Save and reload to verify persistence.
-6. Run an integrity scan and validate actual provider requests on a pilot site before installing on further websites.
+1. Upload the `mk-security-shield` folder to `/wp-content/plugins/`
+2. Activate the plugin through the "Plugins" menu in WordPress
+3. Go to **Security Shield → Settings** to review the defaults (sensible security settings are enabled out of the box; the firewall starts in log-only mode)
+4. Check the **Activity Log** for a few days, switch the firewall to "Block" once you're confident there are no false positives
+5. Optionally enable Two-Factor Authentication for your own account from **Users → Profile**
 
 == Frequently Asked Questions ==
 
-= Why does missing readme.html no longer send an alarm? =
+= Will this break my site? =
 
-readme.html, license.txt and wp-config-sample.php are optional for the running site. Only their absence is ignored. If present, they are checked against official checksums. wp-trackback.php is executable core and is checked by default.
+The Content-Security-Policy header and firewall request filter are the two features most likely to interfere with functionality if your site relies on inline scripts, third-party embeds, or unusual request formats. CSP is disabled by default; the firewall defaults to "log only" so you can monitor the Activity Log for false positives before switching to enforcement.
 
-= Can I add exclusions? =
+= Does this work on Nginx? =
 
-The Files tab accepts relative paths, one per line. Custom exclusions also ignore absence only. Use exclusions only for reviewed intentional removals.
+Most features work on any server. The `.htaccess` hardening only applies to Apache; Nginx users should apply equivalent rules directly in their server block.
 
-= Which AI bots get the country exception? =
+= I'm locked out after enabling 2FA, what do I do? =
 
-Claude-User, Claude-SearchBot, ChatGPT-User and OAI-SearchBot, after IP verification using their official HTTPS feeds. Successful feeds are cached for six hours and failed verification for five minutes. The exception applies to public GET/HEAD paths, not protected admin/login/API routes or writes. It grants no WordPress permissions. Training bots ClaudeBot and GPTBot are not included.
+An administrator can go to **Users**, edit the affected account, and use "Disable two-factor authentication for this user" under the Two-Factor Authentication section. If no other administrator has access, you will need direct database access to delete the `mkss_2fa_enabled` and `mkss_2fa_secret` user meta rows for that user.
 
-= Will this guarantee Claude/ChatGPT access? =
+= Why is the firewall skipping logged-in administrators? =
 
-No. The provider must send a matching identity from its published IP ranges. Hosting/CDN rules, robots.txt and cached blocks can prevent the request before WordPress runs. Check actual request logs and validate each site's layers independently.
+To avoid blocking legitimate site management (for example, editing content that legitimately contains a `<script>` tag or SQL-like text). It fully inspects all other traffic, including anonymous visitors and lower-privileged logged-in users.
 
-= What happens if geolocation or the bot feed is unavailable? =
+= How do I set up Geo Restriction? =
 
-An unknown country is allowed, retaining availability during geo-service failure. A bot that cannot be verified receives no special exception and follows ordinary country rules.
+1. Point your domain's DNS through Cloudflare (free plan works) and make sure the relevant DNS record is "proxied" (orange cloud, not grey/DNS-only).
+2. In **Security Shield → Settings**, under Geo Restriction, **copy your emergency bypass link and save/bookmark it first** — you will need it if you're ever traveling outside the allowed countries.
+3. Check "I confirm this domain is proxied through Cloudflare" and "Enable geo-restriction", set your allowed country codes, and save.
+4. For the strongest version of this protection, also configure your hosting/server firewall to only accept inbound connections from Cloudflare's published IP ranges (https://www.cloudflare.com/ips/) — without this, someone who discovers your origin server's real IP address can connect to it directly and skip Cloudflare (and this restriction) entirely. This plugin verifies the request came from a Cloudflare edge IP as a mitigation, but a server-level firewall rule is the durable fix and isn't something a WordPress plugin can configure for you.
+5. Geo IP data is approximate, and anyone using a VPN/proxy located in an allowed country bypasses this trivially — treat it as attack-noise reduction for a site with a defined regional audience, not a hard perimeter.
 
-= Is Cloudflare supported? =
+= I'm sure Cloudflare is set up correctly, but every request shows "geo_blocked_origin_direct" in the Activity Log — why? =
 
-CF-Connecting-IP is trusted only when the connected peer is within the published Cloudflare IPv4/IPv6 networks. Other proxies require explicit configuration in wp-config.php; see UPGRADE.md. Directly supplied forwarded headers cannot override the peer IP.
+First, verify your domain actually resolves to a Cloudflare IP (not your origin server's real IP) — e.g. `nslookup yourdomain.com` should return an address Cloudflare owns. If that checks out, the likely cause is your host: many managed hosts (Hostinger, Kinsta, WP Engine, SiteGround, and others) automatically rewrite the visitor's IP back to their real address at the web-server level before WordPress ever runs, as a normal, usually-desirable feature. That's good for logging and comment-spam protection, but it also erases the evidence this plugin needs to independently confirm a request actually came through Cloudflare's edge network. If you've confirmed your DNS is correct, enable **"My host restores the real visitor IP"** under Geo Restriction settings — this tells the plugin to trust that your host only performs that rewrite for genuine Cloudflare connections (which is how those hosting features are designed to work) rather than re-verifying it itself.
 
-= Does a scan finding mean malware? =
+= How do I let Claude (or another AI assistant) manage this site? =
 
-No. Core checksum differences require investigation. Code pattern matches can occur in legitimate plugins and must be reviewed before deleting or changing files. Service failures are recorded as unverified, not as confirmed compromise.
-
-= What is outside this plugin's protection? =
-
-Static files served before WordPress, full-site malware detection, application authorization and CDN behavior need separate controls. The existing hardening module disables application passwords, which may affect integrations. See UPGRADE.md for deployment checks and remaining security work.
+1. Go to **Security Shield → Connect AI Assistant**.
+2. Pick an access level — Content Editor is enough for writing/editing posts, pages, and media; only pick Full Control if you specifically need plugin/theme/user management, and expect the extra confirmation it requires.
+3. Click Generate Connection and copy the password shown — it is never shown again, matching how WordPress's own Application Passwords work everywhere else.
+4. Install WordPress core's official [MCP Adapter plugin](https://github.com/WordPress/mcp-adapter) — this plugin issues the credential but deliberately does not implement its own MCP server, since that's WordPress core's job to maintain, not a hardening plugin's.
+5. Point your MCP client (Claude Desktop, Claude Code, etc.) at the adapter using the site URL and the generated Application Password.
+6. To cut off access at any time, come back to this screen and click Revoke Connection — this deletes every Application Password for the service account immediately, not just the most recent one.
 
 == Changelog ==
 
-= 2.1.0 =
-* Repair startup when the unshipped optional two-factor module is absent; report unavailable protection honestly.
-* Add verified public Claude/ChatGPT browsing through country restrictions.
-* Unify geo enable keys, migrate legacy modes and normalize array/text country lists.
-* Run front-end geo checks after route parsing and handle geo outages as unknown countries.
-* Repair settings JavaScript and tab-scoped saves; preserve unrelated settings.
-* Limit file exclusions to absence; restore wp-trackback.php checks.
-* Use installed core package locale, validate manifests, defer scans during core updates and distinguish scan errors from findings.
-* Suppress identical integrity notifications for 24 hours while alerting on new changes.
-* Trust forwarded IP headers only from configured proxies; include verified Cloudflare networks.
-* Inspect decoded raw URLs in the firewall, preserve prior REST auth results, and compare IP-block expiry in UTC.
-* Restrict Slack delivery to HTTPS Slack webhook hosts without redirects.
-* Clarify heuristic scanner wording and remove unsupported feature claims.
-* Add offline PHP/JavaScript regressions and CI.
+= 2.1.1 =
+* Preserve the deployed 1.2.x settings, AI service account, per-user TOTP, login math challenge, database format and daily monitoring.
+* Ignore only absent optional core documentation; check present files, executable core files, official package locale and checksum manifest safety. Persist unverified scans accurately and deduplicate unchanged alerts.
+* Allow source-IP-verified public browsing by ChatGPT-User, OAI-SearchBot, Claude-User and Claude-SearchBot through geo restrictions, without granting login or API access.
+* Delay REST country enforcement until authentication, keep authenticated administrator recovery, prevent shared caching of geo decisions, validate proxy headers and inspect encoded firewall inputs.
 
-= 2.0.0 =
-* Initial source repository import with login protection, firewall, integrity monitor, geo restrictions and code-pattern scanning.
 
-== Upgrade Notice ==
+= 1.2.4 =
+* Connect AI Assistant diagnostics: stop assuming HTTPS is always the cause when Application Passwords are unavailable — separately check and report whether another active plugin is hooking wp_is_application_passwords_available()/_for_user() to disable the feature outright, and list which callback if so.
 
-= 2.1.0 =
-Back up and test on staging. Verify any separately supplied 2FA module before ZIP replacement. Review geo settings and proxy trust on each site. Read UPGRADE.md for checks and rollback.
+= 1.2.3 =
+* Connect AI Assistant: show an HTTPS-detection diagnostics panel when Application Passwords aren't available, so sites behind a CDN/proxy that doesn't clearly forward the original protocol to PHP can be debugged from the actual server values instead of guessing header names.
+
+= 1.2.2 =
+* Malware Scanner: reword internal signature labels so they no longer spell out exact obfuscation call syntax (e.g. "eval(base64_decode(") verbatim — other scanners (Jetpack Protect, Wordfence) that do naive substring matching over every PHP file on a site were flagging the scanner's own signature list as the malware it exists to detect. Detection patterns are unchanged; only display labels were reworded.
+
+= 1.2.1 =
+* Geo Restriction: add "My host restores the real visitor IP" option for hosts (Hostinger, Kinsta, WP Engine, SiteGround, and others) that rewrite REMOTE_ADDR to the real visitor IP before WordPress runs, which otherwise made the Cloudflare-origin verification fail closed even on correctly configured sites.
+
+= 1.2.0 =
+* Add optional "Connect AI Assistant" module — Jetpack-style explicit consent flow issuing a scoped WordPress Application Password to a dedicated, least-privilege service account, with revocation and full audit logging. No bundled MCP server or embedded credentials.
+
+= 1.1.0 =
+* Add optional Geo Restriction module (Cloudflare country header, verified crawler allowlist, emergency bypass link)
+
+= 1.0.0 =
+* Initial release
