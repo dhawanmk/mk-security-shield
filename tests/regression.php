@@ -123,7 +123,7 @@ expect( 20 === MKSS_Settings::instance()->get( 'login_lockout_minutes' ), 'exist
 expect( 1 === MKSS_Settings::instance()->get( 'login_math_captcha' ) && isset( $hooks['login_form'] ), 'existing login challenge retained' );
 expect( 'daily' === $scheduled['mkss_file_monitor_scan'] && 'daily' === $scheduled['mkss_malware_scan'], 'legacy daily integrity and malware schedules retained' );
 expect( ! isset( $hooks['wp_is_application_passwords_available'] ), 'existing application password availability preserved' );
-expect( isset( $hooks['rest_authentication_errors'] ) && isset( $hooks['template_redirect'] ), 'geo waits until routing and REST authentication' );
+expect( isset( $hooks['rest_dispatch_request'] ) && ! isset( $hooks['rest_authentication_errors'] ) && isset( $hooks['template_redirect'] ), 'geo waits until routing, REST authentication and route permissions' );
 expect( DONOTCACHEPAGE, 'geo responses cannot share full-page cache' );
 foreach ( [ [ '198.51.100.255', '198.51.100.0/24', true ], [ '198.51.101.0', '198.51.100.0/24', false ], [ '2001:db8:abcd::1', '2001:db8::/32', true ], [ '2001:db9::', '2001:db8::/32', false ], [ '2001:db8::1', '198.51.100.0/24', false ], [ '1.2.3.4', '0.0.0.0/0', false ], [ '1.2.3.4', '1.2.3.4/33', false ], [ '1.2.3.4', '1.2.3.4/-1', false ], [ '1.2.3.4', '1.2.3.4/32/1', false ], [ '198.51.100.127', '198.51.100.0/25', true ], [ '198.51.100.128', '198.51.100.0/25', false ] ] as $case ) {
 	expect( $case[2] === MKSS_Helper::ip_in_cidr( $case[0], $case[1] ), 'CIDR boundary ' . $case[1] );
@@ -198,7 +198,9 @@ expect( ! denied( [ $geo, 'enforce' ] ), 'allowed visitor country passes' );
 unset( $_SERVER['HTTP_CF_IPCOUNTRY'] ); expect( denied( [ $geo, 'enforce' ] ), 'unknown country remains denied under existing policy' );
 $capable = true; request( '198.51.101.5', 'Mozilla/5.0' ); expect( ! denied( [ $geo, 'enforce' ] ), 'authenticated administrator retains recovery access' ); $capable = false;
 $prior = new WP_Error(); expect( $geo->enforce_rest( $prior ) === $prior, 'REST auth error is preserved' );
-$logged_in = true; expect( true === $geo->enforce_rest( true ), 'authenticated connector access is preserved without adding capabilities' ); $logged_in = false;
+$logged_in = true; expect( null === $geo->enforce_rest( null ), 'late authenticated connector dispatch proceeds without adding capabilities' ); $logged_in = false;
+expect( denied( static function () use ( $geo ) { $geo->enforce_rest( null ); } ), 'anonymous protected REST dispatch still faces country rules' );
+expect( [ 'prior' => 'response' ] === $geo->enforce_rest( [ 'prior' => 'response' ] ), 'existing REST dispatch response is preserved' );
 $geo->disable_geo_cache(); expect( in_array( 'litespeed_control_set_nocache', $actions, true ), 'LiteSpeed receives no-cache directive' );
 $firewall = MKSS_Firewall::instance(); request( '198.51.100.5', 'Claude-User/1.0', '/?q=%253Cscript%253Etest%253C%252Fscript%253E' );
 expect( ! denied( [ $firewall, 'inspect_request' ] ) && 'firewall_match' === end( $logs )['event_type'], 'encoded threat is logged in existing log-only mode' );

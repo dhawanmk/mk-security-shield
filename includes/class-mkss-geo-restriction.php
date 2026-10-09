@@ -88,7 +88,8 @@ class MKSS_Geo_Restriction {
         add_action( 'template_redirect', array( $this, 'enforce' ), 0 );
         add_action( 'login_init', array( $this, 'enforce' ), 0 );
         add_action( 'admin_init', array( $this, 'enforce' ), 0 );
-        add_filter( 'rest_authentication_errors', array( $this, 'enforce_rest' ), 99 );
+        // Runs after authentication and the route's permission callback, including connector auth.
+        add_filter( 'rest_dispatch_request', array( $this, 'enforce_rest' ), 99 );
         add_action( 'init', array( $this, 'disable_geo_cache' ), 0 );
 	}
 
@@ -110,7 +111,7 @@ class MKSS_Geo_Restriction {
     }
 
     public function enforce_rest( $result ) {
-        if ( is_wp_error( $result ) || is_user_logged_in() ) { return $result; }
+        if ( null !== $result || is_user_logged_in() ) { return $result; }
         $this->enforce();
         return $result;
     }
