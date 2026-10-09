@@ -4,7 +4,7 @@ Tags: security, firewall, login security, two-factor, hardening
 Requires at least: 5.8
 Tested up to: 6.6
 Requires PHP: 8.0
-Stable tag: 2.1.1
+Stable tag: 2.1.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -117,6 +117,11 @@ First, verify your domain actually resolves to a Cloudflare IP (not your origin 
 6. To cut off access at any time, come back to this screen and click Revoke Connection — this deletes every Application Password for the service account immediately, not just the most recent one.
 
 == Changelog ==
+
+= 2.1.2 =
+* Accept safe comma and at-sign filenames in official WordPress checksum manifests.
+* Prevent the malware scanner from flagging its own rule declaration while retaining all four webshell marker matches.
+
 
 = 2.1.1 =
 * Preserve the deployed 1.2.x settings, AI service account, per-user TOTP, login math challenge, database format and daily monitoring.

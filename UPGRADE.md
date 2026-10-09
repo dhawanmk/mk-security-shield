@@ -1,4 +1,4 @@
-# MK Security Shield 2.1.1
+# MK Security Shield 2.1.2
 
 The expansion-joints.in pilot was found running 1.2.4, whose source and settings differ substantially from the GitHub 2.0.0 import. This package uses the verified deployed 1.2.x interfaces and incorporates the integrity and verified-public-AI fixes. It retains the settings array, activity-log table, AI service account, application-password behavior, per-user TOTP, login math challenge, daily monitoring, firewall log-only mode and existing Apache rules.
 
@@ -22,3 +22,5 @@ This release is prepared for the verified 1.2.x deployment. A site using the imp
 Confirm the active version; compare prior settings; open the front page and a product page; verify login form and authenticated connector reads; run the integrity and malware scans; temporarily enable geo rules with administrator recovery available, purge caches, verify public requests and authenticated access, then restore the original geo-enabled state. A real Claude/ChatGPT-origin request is needed to prove live provider verification. Spoofing a bot user agent is a negative test, not proof of successful AI access.
 
 Offline tests cover IPv4/IPv6 and proxy boundaries, provider-feed failures, spoofed bots, public/protected paths, geo enforcement, preserved login and scan schedules, encoded firewall inputs, missing-only exclusions, changed-file notifications, checksum failures, update deferral and settings compatibility. They do not prove a site is free of malware.
+
+The live pilot identified valid comma/at-sign paths in the WordPress checksum manifest and a self-match in the malware signature declaration. Version 2.1.2 corrects both. Regression coverage includes valid modern manifests, the scanner source itself and retained detection of all four marker strings.

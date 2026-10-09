@@ -93,7 +93,7 @@ class MKSS_Integrity_Engine {
 		}
 		// Validate the entire manifest before using any supplied path on the filesystem.
 		foreach ( $body['checksums'] as $path => $hash ) {
-			if ( ! is_string( $path ) || ! preg_match( '~^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$~D', $path ) || in_array( '..', explode( '/', $path ), true ) || ! is_string( $hash ) || ! preg_match( '/^[a-f0-9]{32}$/iD', $hash ) ) {
+			if ( ! is_string( $path ) || ! preg_match( '~^[a-zA-Z0-9_@,.-]+(?:/[a-zA-Z0-9_@,.-]+)*$~D', $path ) || in_array( '..', explode( '/', $path ), true ) || ! is_string( $hash ) || ! preg_match( '/^[a-f0-9]{32}$/iD', $hash ) ) {
 				$result['ok'] = false;
 				$result['status'] = 'error';
 				$result['errors'][] = 'Unsafe or invalid checksum manifest. Integrity has not been verified.';

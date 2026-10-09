@@ -3,7 +3,7 @@
  * Plugin Name: MK Security Shield
  * Plugin URI: https://mkdhawan.in
  * Description: Hardens WordPress against common attack vectors: brute-force logins, XML-RPC abuse, user enumeration, malicious requests, and core file tampering. Includes an optional Cloudflare-based country restriction. No single plugin can guarantee protection from "all" hacking threats — pair this with regular updates, strong unique passwords, and off-site backups.
- * Version: 2.1.1
+ * Version: 2.1.2
  * Requires at least: 5.8
  * Requires PHP: 8.0
  * Author: MK Dhawan
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'MKSS_VERSION', '2.1.1' );
+define( 'MKSS_VERSION', '2.1.2' );
 define( 'MKSS_PLUGIN_FILE', __FILE__ );
 define( 'MKSS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MKSS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

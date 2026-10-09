@@ -253,6 +253,21 @@ delete_option( 'core_updater.lock' );
 $manifest = [ 'index.php' => md5( 'core' ), 'wp-content/themes/custom.php' => md5( 'default' ) ];
 $http[$manifest_url] = response( [ 'checksums' => $manifest ] );
 expect( $monitor->run_integrity_check()['ok'], 'custom wp-content is excluded from core verification' );
+$manifest['wp-content/themes/theme/assets/VariableFont_slnt,wght.ttf'] = md5( 'font' );
+$manifest['wp-content/plugins/plugin/logo@2x.png'] = md5( 'image' );
+$http[$manifest_url] = response( [ 'checksums' => $manifest ] );
+expect( $monitor->run_integrity_check()['ok'], 'legitimate comma and at-sign paths in official manifests are accepted safely' );
+$scanner = MKSS_Malware_Scanner::instance();
+$scan_method = new ReflectionMethod( MKSS_Malware_Scanner::class, 'scan_contents' );
+if ( PHP_VERSION_ID < 80100 ) { $scan_method->setAccessible( true ); }
+$matches = [];
+$own_source = file_get_contents( dirname( __DIR__ ) . '/includes/class-mkss-malware-scanner.php' );
+$args = [ $own_source, 'scanner.php', &$matches ]; $scan_method->invokeArgs( $scanner, $args );
+expect( empty( $matches ), 'scanner does not flag its own literal signature database' );
+foreach ( [ 'FilesMan', 'c99shell', 'r57shell', 'b374k' ] as $marker ) {
+    $matches = []; $args = [ $marker, 'fixture.php', &$matches ]; $scan_method->invokeArgs( $scanner, $args );
+    expect( 1 === count( $matches ), 'marker detection retained for ' . $marker );
+}
 $result = MKSS_File_Monitor::instance()->run_scan();
 expect( 'complete' === $result['status'] && isset( get_option( 'mkss_file_monitor_results' )['time'] ), 'legacy results UI receives new verified status' );
 $values = $options['mkss_settings']; $values['harden_htaccess'] = 0; $values['firewall_mode'] = 'log'; $values['notify_email'] = 'owner@example.org';
