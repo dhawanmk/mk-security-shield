@@ -39,7 +39,9 @@ class MKSS_Dashboard {
 		$firewall = (int) $wpdb->get_var( "SELECT COUNT(*) FROM `{$table}` WHERE event_type='firewall_block' AND created_at >= NOW() - INTERVAL 24 HOUR" ); // phpcs:ignore
 
 		$last_check = get_option( 'mkss_last_file_check_result', [] );
-		$file_status = ! empty( $last_check['ok'] ) ? '<span style="color:#27ae60">✓ OK</span>' : '<span style="color:#c0392b">⚠ Issues found</span>';
+		$file_status = empty( $last_check ) || ! empty( $last_check['errors'] )
+			? '<span>Not verified</span>'
+			: ( ! empty( $last_check['ok'] ) ? '<span style="color:#27ae60">✓ OK</span>' : '<span style="color:#c0392b">⚠ Review differences</span>' );
 
 		?>
 		<style>

@@ -53,7 +53,8 @@ class MKSS_Firewall {
 			$this->deny( 'Your IP has been blocked due to suspicious activity.' );
 		}
 
-		$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REQUEST_URI'] ) ) : '';
+		// Inspect raw input before display sanitization can remove an attack payload.
+		$request_uri = isset( $_SERVER['REQUEST_URI'] ) ? wp_unslash( $_SERVER['REQUEST_URI'] ) : '';
 		$query       = isset( $_SERVER['QUERY_STRING'] ) ? wp_unslash( $_SERVER['QUERY_STRING'] ) : ''; // phpcs:ignore
 
 		$checks = [];
@@ -70,11 +71,11 @@ class MKSS_Firewall {
 			$checks[] = [ 'pattern' => '/%2e%2e[%2f%5c]/i', 'type' => 'Directory Traversal (encoded)' ];
 		}
 
-		$target = $request_uri . '?' . $query;
+		$target = rawurldecode( rawurldecode( $request_uri . '?' . $query ) );
 
 		foreach ( $checks as $check ) {
 			if ( preg_match( $check['pattern'], $target ) ) {
-				$this->log_attack( $ip, $check['type'], $target );
+				$this->log_attack( $ip, $check['type'], (string) wp_parse_url( $request_uri, PHP_URL_PATH ) );
 				$this->deny( 'Request blocked by MK Security Shield firewall.' );
 			}
 		}
@@ -96,7 +97,7 @@ class MKSS_Firewall {
 		if ( ! is_admin() ) {
 			$query = isset( $_SERVER['QUERY_STRING'] ) ? $_SERVER['QUERY_STRING'] : ''; // phpcs:ignore
 			if ( preg_match( '/author=\d+/i', $query ) ) {
-				wp_die( esc_html__( 'User enumeration is disabled.', 'mk-security-shield' ), 403 );
+				wp_die( esc_html__( 'User enumeration is disabled.', 'mk-security-shield' ), '', [ 'response' => 403 ] );
 			}
 		}
 	}
@@ -105,6 +106,9 @@ class MKSS_Firewall {
 	 * Restrict REST API to authenticated users only.
 	 */
 	public function restrict_rest_api( $errors ) {
+		if ( null !== $errors ) {
+			return $errors;
+		}
 		if ( ! is_user_logged_in() ) {
 			return new WP_Error( 'rest_not_logged_in', __( 'REST API requires authentication.', 'mk-security-shield' ), [ 'status' => 401 ] );
 		}
@@ -148,7 +152,7 @@ class MKSS_Firewall {
 
 		// HSTS — only on HTTPS
 		if ( is_ssl() ) {
-			header( 'Strict-Transport-Security: max-age=31536000; includeSubDomains' );
+			header( 'Strict-Transport-Security: max-age=31536000' );
 		}
 	}
 
@@ -181,7 +185,7 @@ class MKSS_Firewall {
 		global $wpdb;
 		$table = $wpdb->prefix . 'mkss_ip_blocks';
 		$count = $wpdb->get_var( $wpdb->prepare(
-			"SELECT COUNT(*) FROM `{$table}` WHERE ip_address = %s AND blocked_until > NOW()",
+			"SELECT COUNT(*) FROM `{$table}` WHERE ip_address = %s AND blocked_until > UTC_TIMESTAMP()",
 			$ip
 		) );
 		return (int) $count > 0;

@@ -10,10 +10,11 @@ defined( 'ABSPATH' ) || exit;
 class MKSS_Geo_Restriction {
 
 	public function __construct() {
-		if ( ! get_option( 'mkss_geo_enabled', false ) ) {
+		if ( ! get_option( 'mkss_geo_restriction_enabled', false ) ) {
 			return;
 		}
-		add_action( 'init', [ $this, 'check_visitor_country' ], 5 );
+		// REST_REQUEST is only reliable after WordPress has parsed the request.
+		add_action( 'template_redirect', [ $this, 'check_visitor_country' ], 1 );
 	}
 
 	/**
@@ -24,11 +25,14 @@ class MKSS_Geo_Restriction {
 		if ( is_admin() || ( defined( 'DOING_CRON' ) && DOING_CRON ) || ( defined( 'REST_REQUEST' ) && REST_REQUEST ) ) {
 			return;
 		}
+		if ( MKSS_AI_Connect::can_bypass_geo() ) {
+			return;
+		}
 
 		$ip      = MKSS_Helper::get_ip();
 		$country = MKSS_Helper::get_country( $ip );
 
-		if ( empty( $country ) ) {
+		if ( empty( $country ) || in_array( $country, [ 'XX', 'ZZ', 'LOCAL' ], true ) ) {
 			return; // Can't determine country — allow
 		}
 
@@ -67,19 +71,6 @@ class MKSS_Geo_Restriction {
 	 * @return string[] Uppercase 2-letter country codes.
 	 */
 	private function get_country_list( string $option_name ): array {
-		$raw = (string) get_option( $option_name, '' );
-		if ( empty( $raw ) ) {
-			return [];
-		}
-		// Split on newlines or commas
-		$parts = preg_split( '/[\r\n,]+/', $raw );
-		$codes = [];
-		foreach ( $parts as $part ) {
-			$code = strtoupper( trim( $part ) );
-			if ( preg_match( '/^[A-Z]{2}$/', $code ) ) {
-				$codes[] = $code;
-			}
-		}
-		return array_unique( $codes );
+		return MKSS_Helper::country_codes( get_option( $option_name, [] ) );
 	}
 }

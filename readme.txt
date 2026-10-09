@@ -1,104 +1,91 @@
 === MK Security Shield ===
 Contributors: mkdhawan
-Tags: security, firewall, login protection, malware scanner, geo blocking
-Requires at least: 6.0
-Tested up to: 6.7
-Stable tag: 2.0.0
+Tags: security, firewall, login protection, integrity, geo blocking
+Requires at least: 5.8
+Stable tag: 2.1.0
 Requires PHP: 8.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Advanced security plugin with firewall, login protection, file integrity monitoring, geo blocking, malware scanning, and real-time alerts.
+WordPress login protection, URL firewall, core integrity monitoring, code pattern review, and country restrictions with verified public AI browsing.
 
 == Description ==
 
-MK Security Shield is a comprehensive WordPress security plugin that protects your website from attacks, unauthorised access, and malicious code.
+* Login attempt limits with expiring IP lockouts and activity logging.
+* URL/query rules for common SQL injection, XSS and traversal patterns. These rules supplement normal application validation and server/CDN protection.
+* Core integrity comparisons against official WordPress checksums. Missing optional documentation is ignored; present files are still verified.
+* Country blocklist/allowlist using ipapi.co. Unknown countries are allowed when lookup fails.
+* Verified Claude and ChatGPT user/search bots can read public pages despite country restrictions. Verification requires the official source IP and recognized user-agent; IP blocks and WAF checks still apply.
+* Configurable email and HTTPS Slack incoming-webhook alerts.
+* File-editor disabling, version hiding, security response headers and a WordPress dashboard widget.
+* Heuristic PHP pattern scanning for manual review. Pattern matches are not confirmed infections; a no-match result does not prove the site is malware-free.
 
-**Key Features:**
-
-* **Web Application Firewall (WAF)** — Blocks SQL injection, XSS, directory traversal, and bad bots before they reach WordPress.
-* **Login Protection** — Limits failed login attempts and auto-blocks brute-force IPs. Configurable lockout threshold, duration, and admin email alerts.
-* **File Integrity Monitoring** — Compares WordPress core files against the official WordPress.org checksums API. False positives for intentionally-removed files (readme.html, license.txt) are automatically excluded.
-* **Malware Scanner** — Scans active plugins and theme PHP files for suspicious patterns including eval(), base64_decode(), shell_exec(), remote file inclusions, and known backdoor signatures.
-* **Geo Restriction** — Block or allow visitors by country using ipapi.co. Supports both blocklist and allowlist modes with 2-letter ISO country codes.
-* **Security Hardening** — Disables file editing in admin, removes WordPress version leaks, blocks direct access to sensitive files, enforces strong passwords for administrators.
-* **Activity Log** — Records all security events (login attempts, IP blocks, firewall triggers, file issues) with severity levels. Exportable and searchable.
-* **Real-time Alerts** — Email and Slack webhook notifications for critical events. Daily summary email with 24-hour event counts.
-* **WordPress Dashboard Widget** — At-a-glance security overview on the main WP dashboard.
-* **HTTP Security Headers** — Adds X-Content-Type-Options, X-Frame-Options, HSTS (when on HTTPS), Referrer-Policy, and Permissions-Policy headers automatically.
-* **Cloudflare Compatible** — Correctly detects real visitor IPs behind Cloudflare and other reverse proxies.
+The original source repository referenced a two-factor module that it did not include. This release does not implement 2FA. It avoids the missing-file fatal error and displays an administrator warning when 2FA is configured without a module. Use a maintained independent 2FA solution.
 
 == Installation ==
 
-1. Upload the `mk-security-shield` folder to the `/wp-content/plugins/` directory.
-2. Activate the plugin through the **Plugins** menu in WordPress.
-3. Navigate to **Security Shield** in the admin menu.
-4. Configure settings per tab: Firewall, Login, Hardening, Files, Geo, Notifications.
-5. Run an initial file integrity scan from the **Files** tab.
+1. Back up the database and current plugin folder. Read UPGRADE.md, especially the 2FA and proxy notes.
+2. Test the ZIP on a staging copy before replacing a live installation.
+3. Upload the mk-security-shield folder to wp-content/plugins, or use WordPress's plugin ZIP replacement flow.
+4. Open MK Security and review each settings tab.
+5. In Geo Restriction, confirm mode/countries and Allow Verified AI Browsing. Save and reload to verify persistence.
+6. Run an integrity scan and validate actual provider requests on a pilot site before installing on further websites.
 
 == Frequently Asked Questions ==
 
-= Why am I not getting alerts for readme.html? =
+= Why does missing readme.html no longer send an alarm? =
 
-readme.html, license.txt, wp-config-sample.php, and wp-trackback.php are intentionally excluded from file integrity checks. These files are commonly removed during WordPress hardening and their absence should not trigger a security alert. This is by design in v2.0.
+readme.html, license.txt and wp-config-sample.php are optional for the running site. Only their absence is ignored. If present, they are checked against official checksums. wp-trackback.php is executable core and is checked by default.
 
-= Can I add more files to the exclusion list? =
+= Can I add exclusions? =
 
-Yes. Go to **Security Shield → Files** and add relative file paths (one per line) to the custom exclusion list.
+The Files tab accepts relative paths, one per line. Custom exclusions also ignore absence only. Use exclusions only for reviewed intentional removals.
 
-= Does the malware scanner check all files? =
+= Which AI bots get the country exception? =
 
-The malware scanner checks all PHP files in your currently active plugins and active theme. It looks for common obfuscation and backdoor patterns.
+Claude-User, Claude-SearchBot, ChatGPT-User and OAI-SearchBot, after IP verification using their official HTTPS feeds. Successful feeds are cached for six hours and failed verification for five minutes. The exception applies to public GET/HEAD paths, not protected admin/login/API routes or writes. It grants no WordPress permissions. Training bots ClaudeBot and GPTBot are not included.
 
-= What happens when an IP is blocked? =
+= Will this guarantee Claude/ChatGPT access? =
 
-Blocked IPs are stored in the database with an expiry timestamp. They receive an HTTP 403 error. You can view and manually unblock IPs from the **Blocked IPs** tab.
+No. The provider must send a matching identity from its published IP ranges. Hosting/CDN rules, robots.txt and cached blocks can prevent the request before WordPress runs. Check actual request logs and validate each site's layers independently.
+
+= What happens if geolocation or the bot feed is unavailable? =
+
+An unknown country is allowed, retaining availability during geo-service failure. A bot that cannot be verified receives no special exception and follows ordinary country rules.
 
 = Is Cloudflare supported? =
 
-Yes. The plugin checks CF-Connecting-IP first to get the real visitor IP when your site is behind Cloudflare.
+CF-Connecting-IP is trusted only when the connected peer is within the published Cloudflare IPv4/IPv6 networks. Other proxies require explicit configuration in wp-config.php; see UPGRADE.md. Directly supplied forwarded headers cannot override the peer IP.
 
-= Will geo blocking affect my admin access? =
+= Does a scan finding mean malware? =
 
-Geo blocking skips the WordPress admin area, cron jobs, and REST API internal requests by default.
+No. Core checksum differences require investigation. Code pattern matches can occur in legitimate plugins and must be reviewed before deleting or changing files. Service failures are recorded as unverified, not as confirmed compromise.
 
-== Screenshots ==
+= What is outside this plugin's protection? =
 
-1. Security Dashboard — overview cards and quick scan button.
-2. Firewall Settings — WAF patterns, XML-RPC control, security headers.
-3. Login Protection — attempt limits, lockout duration, alert settings.
-4. File Integrity — scan results with exclusions management.
-5. Activity Log — filterable event log with severity levels.
-6. Blocked IPs — list of currently blocked IPs with one-click unblock.
+Static files served before WordPress, full-site malware detection, application authorization and CDN behavior need separate controls. The existing hardening module disables application passwords, which may affect integrations. See UPGRADE.md for deployment checks and remaining security work.
 
 == Changelog ==
 
+= 2.1.0 =
+* Repair startup when the unshipped optional two-factor module is absent; report unavailable protection honestly.
+* Add verified public Claude/ChatGPT browsing through country restrictions.
+* Unify geo enable keys, migrate legacy modes and normalize array/text country lists.
+* Run front-end geo checks after route parsing and handle geo outages as unknown countries.
+* Repair settings JavaScript and tab-scoped saves; preserve unrelated settings.
+* Limit file exclusions to absence; restore wp-trackback.php checks.
+* Use installed core package locale, validate manifests, defer scans during core updates and distinguish scan errors from findings.
+* Suppress identical integrity notifications for 24 hours while alerting on new changes.
+* Trust forwarded IP headers only from configured proxies; include verified Cloudflare networks.
+* Inspect decoded raw URLs in the firewall, preserve prior REST auth results, and compare IP-block expiry in UTC.
+* Restrict Slack delivery to HTTPS Slack webhook hosts without redirects.
+* Clarify heuristic scanner wording and remove unsupported feature claims.
+* Add offline PHP/JavaScript regressions and CI.
+
 = 2.0.0 =
-* Complete rewrite with PSR-4-style class architecture.
-* Added malware scanner for active plugins and themes.
-* Added geo restriction with blocklist/allowlist mode.
-* Added Slack webhook notifications.
-* Added daily email summary report.
-* Added WordPress dashboard widget.
-* Added HTTP security headers.
-* Added custom DB table for IP blocks with automatic expiry.
-* Fixed false-positive file integrity alerts for intentionally-removed files (readme.html, license.txt, wp-config-sample.php, wp-trackback.php).
-* Improved WAF with expanded bad-bot list and user enumeration blocking.
-* Added configurable security exclusions list.
-* Minimum PHP version raised to 8.0 (uses typed properties, named args, match expressions).
-
-= 1.2.4 =
-* Minor bug fixes.
-* Updated file integrity check against WordPress 6.x checksums.
-
-= 1.2.0 =
-* Added file integrity monitoring.
-* Added activity log.
-
-= 1.0.0 =
-* Initial release: login protection, basic firewall, email alerts.
+* Initial source repository import with login protection, firewall, integrity monitor, geo restrictions and code-pattern scanning.
 
 == Upgrade Notice ==
 
-= 2.0.0 =
-Major upgrade — back up your site before upgrading. After activation, visit Security Shield settings to review and configure the new features. Existing blocked IPs and activity logs are preserved.
+= 2.1.0 =
+Back up and test on staging. Verify any separately supplied 2FA module before ZIP replacement. Review geo settings and proxy trust on each site. Read UPGRADE.md for checks and rollback.

@@ -14,7 +14,7 @@ class MKSS_File_Monitor {
 
 	/**
 	 * Files that are intentionally removed for security hardening.
-	 * These will NEVER trigger a missing-file alert.
+	 * Only their absence is ignored. Present files are always verified.
 	 *
 	 * Admins can extend this list via the 'mkss_security_exclusions' option
 	 * or the 'mkss_file_monitor_exclusions' filter.
@@ -25,7 +25,6 @@ class MKSS_File_Monitor {
 		'readme.html',
 		'license.txt',
 		'wp-config-sample.php',
-		'wp-trackback.php',
 	];
 
 	public function __construct() {
@@ -41,7 +40,8 @@ class MKSS_File_Monitor {
 	 */
 	private function get_exclusions(): array {
 		// User-configured exclusions stored in DB
-		$db_exclusions = (array) get_option( 'mkss_security_exclusions', [] );
+		$raw = get_option( 'mkss_security_exclusions', [] );
+		$db_exclusions = is_array( $raw ) ? $raw : preg_split( '/[\r\n,]+/', (string) $raw );
 
 		$all = array_unique( array_merge( $this->builtin_exclusions, $db_exclusions ) );
 
@@ -50,7 +50,7 @@ class MKSS_File_Monitor {
 		 *
 		 * @param string[] $exclusions Relative paths (e.g. 'readme.html').
 		 */
-		return apply_filters( 'mkss_file_monitor_exclusions', $all );
+		return (array) apply_filters( 'mkss_file_monitor_exclusions', $all );
 	}
 
 	/**
@@ -59,30 +59,51 @@ class MKSS_File_Monitor {
 	 * @return array{ok: bool, issues: array, skipped: int, checked: int}
 	 */
 	public function run_integrity_check(): array {
-		global $wp_version;
+		global $wp_version, $wp_local_package;
 
-		$locale   = get_locale();
-		$api_url  = "https://api.wordpress.org/core/checksums/1.0/?version={$wp_version}&locale={$locale}";
-		$response = wp_remote_get( $api_url, [ 'timeout' => 15 ] );
+		// Installed core package locale can differ from the visitor/admin UI language.
+		$locale = $wp_local_package ?? 'en_US';
 
 		$result = [
 			'ok'      => true,
 			'issues'  => [],
 			'skipped' => 0,
 			'checked' => 0,
+			'errors'  => [],
+			'status'  => 'complete',
 		];
+		$lock = (int) get_option( 'core_updater.lock', 0 );
+		if ( ( file_exists( ABSPATH . '.maintenance' ) && filemtime( ABSPATH . '.maintenance' ) > time() - 10 * MINUTE_IN_SECONDS ) || ( $lock > time() - 15 * MINUTE_IN_SECONDS ) ) {
+			$result['ok'] = false;
+			$result['status'] = 'deferred';
+			$result['errors'][] = 'Core update in progress. Run the integrity check again after it finishes.';
+			return $this->store_result( $result );
+		}
+		$api_url = add_query_arg( [ 'version' => $wp_version, 'locale' => $locale ], 'https://api.wordpress.org/core/checksums/1.0/' );
+		$response = wp_safe_remote_get( $api_url, [ 'timeout' => 15, 'redirection' => 0, 'limit_response_size' => 2097152 ] );
 
 		if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
 			$result['ok']     = false;
-			$result['issues'] = [ 'Could not reach WordPress checksums API.' ];
-			return $result;
+			$result['status'] = 'error';
+			$result['errors'] = [ 'Could not reach WordPress checksums API. Integrity has not been verified.' ];
+			return $this->store_result( $result );
 		}
 
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( empty( $body['checksums'] ) ) {
+		if ( empty( $body['checksums'] ) || ! is_array( $body['checksums'] ) ) {
 			$result['ok']     = false;
-			$result['issues'] = [ 'Invalid checksums response from API.' ];
-			return $result;
+			$result['status'] = 'error';
+			$result['errors'] = [ 'Invalid checksums response from API. Integrity has not been verified.' ];
+			return $this->store_result( $result );
+		}
+		// Validate the entire manifest before using any supplied path on the filesystem.
+		foreach ( $body['checksums'] as $path => $hash ) {
+			if ( ! is_string( $path ) || ! preg_match( '~^[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)*$~D', $path ) || in_array( '..', explode( '/', $path ), true ) || ! is_string( $hash ) || ! preg_match( '/^[a-f0-9]{32}$/iD', $hash ) ) {
+				$result['ok'] = false;
+				$result['status'] = 'error';
+				$result['errors'][] = 'Unsafe or invalid checksum manifest. Integrity has not been verified.';
+				return $this->store_result( $result );
+			}
 		}
 
 		$exclusions = $this->get_exclusions();
@@ -91,7 +112,7 @@ class MKSS_File_Monitor {
 		foreach ( $body['checksums'] as $relative_path => $expected_md5 ) {
 
 			// Skip intentionally-removed / security-hardened files
-			if ( in_array( $relative_path, $exclusions, true ) ) {
+			if ( ! file_exists( ABSPATH . $relative_path ) && ! is_link( ABSPATH . $relative_path ) && in_array( $relative_path, $exclusions, true ) ) {
 				$result['skipped']++;
 				continue;
 			}
@@ -99,17 +120,17 @@ class MKSS_File_Monitor {
 			$result['checked']++;
 			$full_path = ABSPATH . $relative_path;
 
-			if ( ! file_exists( $full_path ) ) {
+			if ( is_link( $full_path ) || ! is_file( $full_path ) || ! is_readable( $full_path ) ) {
 				$issues[] = [
-					'type' => 'missing',
+					'type' => file_exists( $full_path ) || is_link( $full_path ) ? 'unreadable' : 'missing',
 					'file' => $relative_path,
-					'msg'  => "Missing core file: {$relative_path}",
+					'msg'  => "Missing, unreadable or linked core file: {$relative_path}",
 				];
 				continue;
 			}
 
-			$actual_md5 = md5_file( $full_path );
-			if ( $actual_md5 !== $expected_md5 ) {
+			$actual_md5 = @md5_file( $full_path );
+			if ( $actual_md5 !== strtolower( $expected_md5 ) ) {
 				$issues[] = [
 					'type'     => 'modified',
 					'file'     => $relative_path,
@@ -126,11 +147,17 @@ class MKSS_File_Monitor {
 		// Log and notify if issues found
 		if ( ! empty( $issues ) ) {
 			$this->handle_issues( $issues );
+		} else {
+			delete_option( 'mkss_integrity_alert_state' );
 		}
 
-		// Store last-check timestamp
+		return $this->store_result( $result );
+	}
+
+	/** Persist scan failures as unknown/error, never as a clean or infected result. */
+	private function store_result( array $result ): array {
 		update_option( 'mkss_last_file_check', current_time( 'mysql' ) );
-		update_option( 'mkss_last_file_check_result', $result );
+		update_option( 'mkss_last_file_check_result', $result, false );
 
 		return $result;
 	}
@@ -153,14 +180,20 @@ class MKSS_File_Monitor {
 		if ( ! get_option( 'mkss_notify_on_file_change', true ) ) {
 			return;
 		}
+		$fingerprints = array_map( static function ( $issue ) {
+			return $issue['file'] . ':' . $issue['type'] . ':' . ( $issue['actual'] ?? '' );
+		}, $issues );
+		sort( $fingerprints );
+		$fingerprint = hash( 'sha256', implode( '|', $fingerprints ) );
+		$previous = get_option( 'mkss_integrity_alert_state', [] );
+		if ( ( $previous['fingerprint'] ?? '' ) === $fingerprint && ( $previous['time'] ?? 0 ) > time() - DAY_IN_SECONDS ) {
+			return;
+		}
 
 		$rows = '';
 		foreach ( $issues as $issue ) {
-			$badge = 'modified' === $issue['type']
-				? '<span style="background:#e67e22;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">MODIFIED</span>'
-				: '<span style="background:#c0392b;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;">MISSING</span>';
-			$rows .= "<tr><td style='padding:6px 12px;border-bottom:1px solid #eee;'>{$badge}</td>"
-				. "<td style='padding:6px 12px;border-bottom:1px solid #eee;font-family:monospace;'>{$issue['file']}</td></tr>";
+			$rows .= "<tr><td style='padding:6px 12px;border-bottom:1px solid #eee;'>" . esc_html( strtoupper( $issue['type'] ) ) . '</td>'
+				. "<td style='padding:6px 12px;border-bottom:1px solid #eee;font-family:monospace;'>" . esc_html( $issue['file'] ) . '</td></tr>';
 		}
 
 		$body = "
@@ -172,12 +205,13 @@ class MKSS_File_Monitor {
 				</tr></thead>
 				<tbody>{$rows}</tbody>
 			</table>
-			<p style='margin-top:16px;'>Please review your site immediately. If you intentionally removed a file for security,
-			add it to the <strong>Security Exclusions</strong> list in MK Security Shield settings.</p>
+			<p style='margin-top:16px;'>These checksum differences require review; they are not proof of a compromise.
+			Missing optional documentation is ignored, but present excluded files are still checked.</p>
 		";
 
 		MKSS_Helper::send_alert( 'Core File Integrity Alert', $body );
 		MKSS_Helper::send_slack( '⚠️ Core file integrity issues found: ' . count( $issues ) . ' file(s). Check your admin email.' );
+		update_option( 'mkss_integrity_alert_state', [ 'fingerprint' => $fingerprint, 'time' => time() ], false );
 	}
 
 	/**
@@ -191,7 +225,7 @@ class MKSS_File_Monitor {
 			return;
 		}
 		$result = $this->run_integrity_check();
-		$status = $result['ok'] ? 'ok' : 'issues';
+		$status = 'complete' !== $result['status'] ? $result['status'] : ( $result['ok'] ? 'ok' : 'issues' );
 		wp_safe_redirect( add_query_arg( [ 'mkss_scan' => $status, 'mkss_count' => count( $result['issues'] ) ], wp_get_referer() ) );
 		exit;
 	}

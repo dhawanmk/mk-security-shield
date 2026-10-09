@@ -8,6 +8,15 @@
 defined( 'ABSPATH' ) || exit;
 
 class MKSS_Helper {
+	/** Cloudflare's published proxy ranges, verified 2026-10-09. */
+	private const CLOUDFLARE_PROXIES = [
+		'173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+		'141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+		'197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+		'104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22', '2400:cb00::/32',
+		'2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32',
+		'2a06:98c0::/29', '2c0f:f248::/32',
+	];
 
 	/**
 	 * Default plugin options for v2.0.
@@ -47,9 +56,11 @@ class MKSS_Helper {
 			],
 
 			// Geo restriction
-			'mkss_enable_geo'              => false,
+			'mkss_geo_restriction_enabled' => false,
 			'mkss_geo_allowed_countries'   => [ 'IN' ],
-			'mkss_geo_mode'                => 'whitelist',
+			'mkss_geo_blocked_countries'   => [],
+			'mkss_geo_mode'                => 'blocklist',
+			'mkss_geo_allow_verified_ai'   => true,
 
 			// Notifications
 			'mkss_notify_on_login_fail'    => true,
@@ -122,37 +133,111 @@ class MKSS_Helper {
 		update_option( 'mkss_db_version', MKSS_DB_VERSION );
 	}
 
-	/**
-	 * Get the real visitor IP address.
-	 */
-	public static function get_ip(): string {
-		$headers = [
-			'HTTP_CF_CONNECTING_IP',   // Cloudflare
-			'HTTP_X_REAL_IP',
-			'HTTP_X_FORWARDED_FOR',
-			'REMOTE_ADDR',
-		];
+	/** Migrate legacy geo keys once; an explicit current setting wins. */
+	public static function migrate_options(): void {
+		if ( '2.1.0' === get_option( 'mkss_options_version' ) ) {
+			return;
+		}
+		if ( null === get_option( 'mkss_geo_restriction_enabled', null ) ) {
+			$enabled = get_option( 'mkss_geo_enabled', get_option( 'mkss_enable_geo', false ) );
+			add_option( 'mkss_geo_restriction_enabled', (bool) $enabled );
+		}
+		$mode = get_option( 'mkss_geo_mode', 'blocklist' );
+		if ( in_array( $mode, [ 'whitelist', 'blacklist' ], true ) ) {
+			update_option( 'mkss_geo_mode', 'whitelist' === $mode ? 'allowlist' : 'blocklist' );
+		}
+		foreach ( [ 'mkss_geo_allowed_countries', 'mkss_geo_blocked_countries' ] as $key ) {
+			update_option( $key, self::country_codes( get_option( $key, [] ) ) );
+		}
+		add_option( 'mkss_geo_allow_verified_ai', true );
+		update_option( 'mkss_options_version', '2.1.0', false );
+	}
 
-		foreach ( $headers as $header ) {
-			if ( ! empty( $_SERVER[ $header ] ) ) {
-				$ip = trim( explode( ',', sanitize_text_field( wp_unslash( $_SERVER[ $header ] ) ) )[0] );
-				if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) {
-					return $ip;
-				}
+	/** Accept legacy text lists and current arrays without array-to-string warnings. */
+	public static function country_codes( $raw ): array {
+		$parts = is_array( $raw ) ? $raw : preg_split( '/[\s,]+/', (string) $raw );
+		$codes = [];
+		foreach ( $parts as $part ) {
+			if ( ! is_scalar( $part ) ) {
+				continue;
+			}
+			$code = strtoupper( trim( (string) $part ) );
+			if ( preg_match( '/^[A-Z]{2}$/D', $code ) && ! in_array( $code, [ 'XX', 'ZZ' ], true ) ) {
+				$codes[] = $code;
 			}
 		}
-		return '0.0.0.0';
+		return array_values( array_unique( $codes ) );
+	}
+
+	/** Match IPv4/IPv6 networks; malformed or all-address prefixes are rejected. */
+	public static function ip_in_cidr( string $ip, string $cidr ): bool {
+		$parts = explode( '/', $cidr );
+		$address = @inet_pton( $ip );
+		$network = @inet_pton( $parts[0] );
+		if ( false === $address || false === $network || strlen( $address ) !== strlen( $network ) || count( $parts ) > 2 ) {
+			return false;
+		}
+		$bits = $parts[1] ?? (string) ( strlen( $address ) * 8 );
+		if ( ! ctype_digit( $bits ) || (int) $bits < 1 || (int) $bits > strlen( $address ) * 8 ) {
+			return false;
+		}
+		$bytes = intdiv( (int) $bits, 8 );
+		$remaining = (int) $bits % 8;
+		return substr( $address, 0, $bytes ) === substr( $network, 0, $bytes )
+			&& ( 0 === $remaining || ( ord( $address[$bytes] ) & ( 255 << ( 8 - $remaining ) ) ) === ( ord( $network[$bytes] ) & ( 255 << ( 8 - $remaining ) ) ) );
+	}
+
+	/** Forwarded headers are authoritative only from explicitly trusted proxy peers. */
+	public static function get_ip(): string {
+		$peer = $_SERVER['REMOTE_ADDR'] ?? '';
+		if ( ! is_string( $peer ) || ! filter_var( $peer, FILTER_VALIDATE_IP ) ) {
+			return '0.0.0.0';
+		}
+		// Set these constants in wp-config.php using the host's documented proxy ranges/header.
+		$ranges = defined( 'MKSS_TRUSTED_PROXIES' ) ? (array) MKSS_TRUSTED_PROXIES : self::CLOUDFLARE_PROXIES;
+		$trusted = static function ( string $candidate ) use ( $ranges ): bool {
+			foreach ( $ranges as $range ) {
+				if ( is_string( $range ) && self::ip_in_cidr( $candidate, $range ) ) {
+					return true;
+				}
+			}
+			return false;
+		};
+		$header = defined( 'MKSS_CLIENT_IP_HEADER' ) ? MKSS_CLIENT_IP_HEADER : 'HTTP_CF_CONNECTING_IP';
+		if ( ! $trusted( $peer ) || ! in_array( $header, [ 'HTTP_CF_CONNECTING_IP', 'HTTP_X_REAL_IP', 'HTTP_X_FORWARDED_FOR' ], true ) ) {
+			return $peer;
+		}
+		$value = $_SERVER[$header] ?? '';
+		if ( ! is_string( $value ) || strlen( $value ) > 2048 ) {
+			return $peer;
+		}
+		$chain = array_map( 'trim', explode( ',', $value ) );
+		if ( 'HTTP_X_FORWARDED_FOR' !== $header && count( $chain ) !== 1 ) {
+			return $peer;
+		}
+		foreach ( array_reverse( $chain ) as $candidate ) {
+			if ( ! filter_var( $candidate, FILTER_VALIDATE_IP ) ) {
+				return $peer;
+			}
+			if ( ! $trusted( $candidate ) ) {
+				return $candidate;
+			}
+		}
+		return $peer;
 	}
 
 	/**
 	 * Get country code for an IP via ipapi.co (free, no key needed).
 	 */
 	public static function get_country( string $ip ): string {
-		if ( '127.0.0.1' === $ip || '::1' === $ip ) {
-			return 'LOCAL';
+		if ( ! filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+			return '';
 		}
 		$cached = get_transient( 'mkss_geo_' . md5( $ip ) );
-		if ( $cached ) {
+		if ( 'XX' === $cached ) {
+			return '';
+		}
+		if ( is_string( $cached ) && preg_match( '/^[A-Z]{2}$/D', $cached ) && ! in_array( $cached, [ 'XX', 'ZZ' ], true ) ) {
 			return $cached;
 		}
 		$response = wp_remote_get(
@@ -160,14 +245,15 @@ class MKSS_Helper {
 			[ 'timeout' => 3, 'user-agent' => 'MK-Security-Shield/' . MKSS_VERSION ]
 		);
 		if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
-			return 'XX';
+			set_transient( 'mkss_geo_' . md5( $ip ), 'XX', 5 * MINUTE_IN_SECONDS );
+			return '';
 		}
 		$country = strtoupper( trim( wp_remote_retrieve_body( $response ) ) );
-		if ( preg_match( '/^[A-Z]{2}$/', $country ) ) {
+		if ( preg_match( '/^[A-Z]{2}$/D', $country ) && ! in_array( $country, [ 'XX', 'ZZ' ], true ) ) {
 			set_transient( 'mkss_geo_' . md5( $ip ), $country, DAY_IN_SECONDS );
 			return $country;
 		}
-		return 'XX';
+		return '';
 	}
 
 	/**
@@ -207,10 +293,14 @@ class MKSS_Helper {
 		if ( empty( $webhook ) ) {
 			return;
 		}
-		wp_remote_post( $webhook, [
+		if ( 'https' !== wp_parse_url( $webhook, PHP_URL_SCHEME ) || ! in_array( wp_parse_url( $webhook, PHP_URL_HOST ), [ 'hooks.slack.com', 'hooks.slack-gov.com' ], true ) ) {
+			return;
+		}
+		wp_safe_remote_post( $webhook, [
 			'body'    => wp_json_encode( [ 'text' => '🔒 *MK Security Shield* | ' . get_bloginfo( 'name' ) . "\n" . $message ] ),
 			'headers' => [ 'Content-Type' => 'application/json' ],
 			'timeout' => 5,
+			'redirection' => 0,
 		] );
 	}
 

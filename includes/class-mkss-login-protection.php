@@ -72,7 +72,7 @@ class MKSS_Login_Protection {
 		global $wpdb;
 		$table = $wpdb->prefix . 'mkss_ip_blocks';
 		$row   = $wpdb->get_row( $wpdb->prepare(
-			"SELECT * FROM `{$table}` WHERE ip_address = %s AND blocked_until > NOW()",
+			"SELECT * FROM `{$table}` WHERE ip_address = %s AND blocked_until > UTC_TIMESTAMP()",
 			$ip
 		) );
 

@@ -63,6 +63,7 @@ class MKSS_Settings {
 			'mkss_notify_slack_webhook'       => 'url',
 			// Geo restriction
 			'mkss_geo_restriction_enabled'    => 'bool',
+			'mkss_geo_allow_verified_ai'      => 'bool',
 			'mkss_geo_allowed_countries'      => 'array_text',
 			'mkss_geo_blocked_countries'      => 'array_text',
 			'mkss_geo_mode'                   => 'text',
@@ -124,6 +125,9 @@ class MKSS_Settings {
 			$count  = isset( $_GET['mkss_count'] ) ? (int) $_GET['mkss_count'] : 0; // phpcs:ignore
 			if ( 'ok' === $status ) {
 				echo '<div class="notice notice-success is-dismissible"><p><strong>' . esc_html__( 'File Integrity OK', 'mk-security-shield' ) . '</strong> — ' . esc_html__( 'No issues found.', 'mk-security-shield' ) . '</p></div>';
+			} elseif ( in_array( $status, [ 'error', 'deferred' ], true ) ) {
+				$result = get_option( 'mkss_last_file_check_result', [] );
+				echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html( implode( ' ', $result['errors'] ?? [ 'Integrity check did not complete.' ] ) ) . '</p></div>';
 			} else {
 				echo '<div class="notice notice-error is-dismissible"><p><strong>' . esc_html__( 'File Integrity Issues Found', 'mk-security-shield' ) . '</strong> — ' . sprintf( esc_html__( '%d file(s) modified or missing. Check the activity log.', 'mk-security-shield' ), $count ) . '</p></div>';
 			}
@@ -148,6 +152,17 @@ class MKSS_Settings {
 		if ( ! is_array( $posted ) ) {
 			wp_send_json_error( 'Invalid data' );
 		}
+		foreach ( $posted as $value ) {
+			if ( ! is_scalar( $value ) ) {
+				wp_send_json_error( 'Invalid setting value' );
+			}
+		}
+		if ( ! empty( $posted['mkss_notify_slack_webhook'] ) ) {
+			$url = esc_url_raw( $posted['mkss_notify_slack_webhook'] );
+			if ( 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) || ! in_array( wp_parse_url( $url, PHP_URL_HOST ), [ 'hooks.slack.com', 'hooks.slack-gov.com' ], true ) ) {
+				wp_send_json_error( 'Use an HTTPS Slack incoming webhook URL.' );
+			}
+		}
 
 		$bool_fields = [
 			'mkss_block_sql_injection', 'mkss_block_xss', 'mkss_block_directory_traversal',
@@ -155,15 +170,20 @@ class MKSS_Settings {
 			'mkss_disable_pingback', 'mkss_enable_rest_api_protection',
 			'mkss_hide_login_errors', 'mkss_notify_on_login_fail',
 			'mkss_remove_wp_version', 'mkss_disable_file_editor',
-			'mkss_notify_on_file_change', 'mkss_geo_restriction_enabled',
+			'mkss_notify_on_file_change', 'mkss_geo_restriction_enabled', 'mkss_geo_allow_verified_ai',
 		];
 		foreach ( $bool_fields as $field ) {
-			update_option( $field, isset( $posted[ $field ] ) && $posted[ $field ] ? true : false );
+			if ( array_key_exists( $field, $posted ) ) {
+				update_option( $field, in_array( $posted[$field], [ true, 1, '1' ], true ) );
+			}
 		}
 
 		$int_fields = [ 'mkss_max_login_attempts' => 5, 'mkss_lockout_duration' => 30 ];
 		foreach ( $int_fields as $field => $default ) {
-			update_option( $field, isset( $posted[ $field ] ) ? max( 1, (int) $posted[ $field ] ) : $default );
+			if ( isset( $posted[$field] ) ) {
+				$maximum = 'mkss_max_login_attempts' === $field ? 20 : 10080;
+				update_option( $field, min( $maximum, max( 1, (int) $posted[$field] ) ) );
+			}
 		}
 
 		if ( ! empty( $posted['mkss_notify_email'] ) ) {
@@ -176,7 +196,9 @@ class MKSS_Settings {
 		// Array fields (newline separated)
 		foreach ( [ 'mkss_security_exclusions', 'mkss_geo_allowed_countries', 'mkss_geo_blocked_countries' ] as $field ) {
 			if ( isset( $posted[ $field ] ) ) {
-				$lines = array_filter( array_map( 'sanitize_text_field', explode( "\n", $posted[ $field ] ) ) );
+				$lines = 'mkss_security_exclusions' === $field
+					? array_filter( array_map( 'trim', array_map( 'sanitize_text_field', preg_split( '/[\r\n,]+/', (string) $posted[$field] ) ) ) )
+					: MKSS_Helper::country_codes( $posted[$field] );
 				update_option( $field, array_values( $lines ) );
 			}
 		}
@@ -289,6 +311,8 @@ class MKSS_Settings {
 				<h3><?php esc_html_e( 'File Integrity', 'mk-security-shield' ); ?></h3>
 				<?php if ( empty( $last_result ) ) : ?>
 					<p><?php esc_html_e( 'No scan run yet.', 'mk-security-shield' ); ?></p>
+				<?php elseif ( ! empty( $last_result['errors'] ) ) : ?>
+					<p class="mkss-warn"><?php echo esc_html( implode( ' ', $last_result['errors'] ) ); ?></p>
 				<?php elseif ( $last_result['ok'] ) : ?>
 					<p class="mkss-ok">✅ <?php esc_html_e( 'All core files intact.', 'mk-security-shield' ); ?></p>
 				<?php else : ?>
@@ -428,7 +452,7 @@ class MKSS_Settings {
 						<textarea name="mkss_security_exclusions" rows="6" cols="40" class="large-text code"><?php echo esc_textarea( implode( "\n", $exclusions ) ); ?></textarea>
 						<p class="description">
 							<?php esc_html_e( 'Files intentionally removed for security (one per line). These will never trigger a missing-file alert.', 'mk-security-shield' ); ?><br>
-							<strong><?php esc_html_e( 'Built-in exclusions (always applied):', 'mk-security-shield' ); ?></strong> readme.html, license.txt, wp-config-sample.php, wp-trackback.php
+							<strong><?php esc_html_e( 'Missing-only exclusions (present files are still verified):', 'mk-security-shield' ); ?></strong> readme.html, license.txt, wp-config-sample.php
 						</p>
 					</td>
 				</tr>
@@ -449,6 +473,7 @@ class MKSS_Settings {
 
 			<table class="form-table">
 				<?php $this->toggle_row( 'mkss_geo_restriction_enabled', __( 'Enable Geo Restriction', 'mk-security-shield' ), __( 'Block or allow visitors based on country.', 'mk-security-shield' ) ); ?>
+				<?php $this->toggle_row( 'mkss_geo_allow_verified_ai', __( 'Allow Verified AI Browsing', 'mk-security-shield' ), __( 'Allow Claude-User, Claude-SearchBot, ChatGPT-User and OAI-SearchBot on public GET/HEAD pages after checking official IP ranges. Firewall and login protections still apply. Training crawlers are not included. Unknown countries are allowed if geolocation is unavailable.', 'mk-security-shield' ) ); ?>
 				<tr>
 					<th><?php esc_html_e( 'Mode', 'mk-security-shield' ); ?></th>
 					<td>
@@ -598,7 +623,7 @@ class MKSS_Settings {
 	 * ------------------------------------------------------------- */
 
 	private function toggle_row( string $option, string $label, string $desc ): void {
-		$val = get_option( $option, true );
+		$val = get_option( $option, ! in_array( $option, [ 'mkss_geo_restriction_enabled', 'mkss_enable_rest_api_protection' ], true ) );
 		?>
 		<tr>
 			<th><?php echo esc_html( $label ); ?></th>

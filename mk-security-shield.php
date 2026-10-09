@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       MK Security Shield
  * Plugin URI:        https://mkdhawan.com/mk-security-shield
- * Description:       Advanced WordPress security plugin. Login protection, firewall, file integrity monitoring, malware scanning, geo-restriction, and 2FA.
- * Version:           2.0.0
+ * Description:       WordPress login protection, firewall, file integrity monitoring, pattern scanning, and geo-restriction with verified AI browsing.
+ * Version:           2.1.0
  * Author:            MK Dhawan
  * Author URI:        https://mkdhawan.com
  * License:           GPL-2.0+
@@ -11,7 +11,7 @@
  * Text Domain:       mk-security-shield
  * Domain Path:       /languages
  * Requires at least: 5.8
- * Requires PHP:      7.4
+ * Requires PHP:      8.0
  *
  * @package MK_Security_Shield
  */
@@ -19,7 +19,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // Plugin constants
-define( 'MKSS_VERSION', '2.0.0' );
+define( 'MKSS_VERSION', '2.1.0' );
 define( 'MKSS_PLUGIN_FILE', __FILE__ );
 define( 'MKSS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'MKSS_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
@@ -33,7 +33,10 @@ require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-settings.php';
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-login-protection.php';
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-firewall.php';
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-hardening.php';
-require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-two-factor.php';
+// The original repository did not ship this optional module. Preserve it if supplied separately.
+if ( is_readable( MKSS_PLUGIN_DIR . 'includes/class-mkss-two-factor.php' ) ) {
+	require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-two-factor.php';
+}
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-malware-scanner.php';
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-file-monitor.php';
 require_once MKSS_PLUGIN_DIR . 'includes/class-mkss-geo-restriction.php';
@@ -66,6 +69,7 @@ final class MK_Security_Shield {
 	 * Constructor — private to enforce singleton.
 	 */
 	private function __construct() {
+		MKSS_Helper::migrate_options();
 		$this->load_textdomain();
 		$this->init_modules();
 		$this->register_hooks();
@@ -88,7 +92,9 @@ final class MK_Security_Shield {
 		$this->modules['login_protection'] = new MKSS_Login_Protection();
 		$this->modules['firewall']         = new MKSS_Firewall();
 		$this->modules['hardening']        = new MKSS_Hardening();
-		$this->modules['two_factor']       = new MKSS_Two_Factor();
+		if ( class_exists( 'MKSS_Two_Factor' ) ) {
+			$this->modules['two_factor'] = new MKSS_Two_Factor();
+		}
 		$this->modules['malware_scanner']  = new MKSS_Malware_Scanner();
 		$this->modules['file_monitor']     = new MKSS_File_Monitor();
 		$this->modules['geo_restriction']  = new MKSS_Geo_Restriction();
@@ -148,6 +154,12 @@ final class MK_Security_Shield {
 	 * Show upgrade notice when major version changes.
 	 */
 	public function maybe_show_upgrade_notice(): void {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		if ( get_option( 'mkss_enable_2fa', false ) && ! class_exists( 'MKSS_Two_Factor' ) ) {
+			echo '<div class="notice notice-error"><p>' . esc_html__( 'MK Security Shield: the two-factor module is missing. Two-factor protection is unavailable; configure a maintained 2FA plugin before relying on it.', 'mk-security-shield' ) . '</p></div>';
+		}
 		$stored = get_option( 'mkss_version', '1.0.0' );
 		if ( version_compare( $stored, MKSS_VERSION, '<' ) ) {
 			echo '<div class="notice notice-success is-dismissible"><p>';
